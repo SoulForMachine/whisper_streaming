@@ -31,7 +31,7 @@ class ASRBase:
     sep = " "   # join transcribe words with this character (" " for whisper_timestamped,
                 # "" for faster-whisper because it emits the spaces when neeeded)
 
-    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr):
+    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr, no_speech_prob_threshold=0.9):
         self.logfile = logfile
 
         self.transcribe_kargs = {}
@@ -41,6 +41,8 @@ class ASRBase:
             self.original_language = lan
 
         self.model = self.load_model(modelsize, cache_dir, model_dir)
+
+        self.no_speech_prob_threshold = no_speech_prob_threshold
 
 
     def load_model(self, modelsize, cache_dir):
@@ -116,7 +118,7 @@ class FasterWhisperASR(ASRBase):
 
 
         # this worked fast and reliably on NVIDIA L40
-        model = WhisperModel(model_size_or_path, device="cuda", compute_type="float16", download_root=cache_dir)
+        model = WhisperModel(model_size_or_path, device="cuda", compute_type="default", download_root=cache_dir)
 
         # or run on GPU with INT8
         # tested: the transcripts were different, probably worse than with FP16, and it was slightly (appx 20%) slower
@@ -139,7 +141,8 @@ class FasterWhisperASR(ASRBase):
         o = []
         for segment in segments:
             for word in segment.words:
-                if segment.no_speech_prob > 0.9:
+                if segment.no_speech_prob > self.no_speech_prob_threshold:
+                    print(f"Skipping word {word.word} ({self.no_speech_prob_threshold}) because it's in a no-speech segment")
                     continue
                 # not stripping the spaces -- should not be merged with them!
                 w = word.word
@@ -256,7 +259,7 @@ class MLXWhisper(ASRBase):
             (word["start"], word["end"], word["word"])
             for segment in segments
             for word in segment.get("words", [])
-            if segment.get("no_speech_prob", 0) <= 0.9
+            if segment.get("no_speech_prob", 0) <= self.no_speech_prob_threshold
         ]
     
     def segments_end_ts(self, res):
@@ -271,7 +274,7 @@ class MLXWhisper(ASRBase):
 class OpenaiApiASR(ASRBase):
     """Uses OpenAI's Whisper API for audio transcription."""
 
-    def __init__(self, lan=None, temperature=0, logfile=sys.stderr):
+    def __init__(self, lan=None, temperature=0, logfile=sys.stderr, no_speech_prob_threshold=0.8):
         self.logfile = logfile
 
         self.modelname = "whisper-1"  
@@ -285,6 +288,7 @@ class OpenaiApiASR(ASRBase):
 
         # reset the task in set_translate_task
         self.task = "transcribe"
+        self.no_speech_prob_threshold = no_speech_prob_threshold
 
     def load_model(self, *args, **kwargs):
         from openai import OpenAI
@@ -298,7 +302,7 @@ class OpenaiApiASR(ASRBase):
         if self.use_vad_opt:
             for segment in segments.segments:
                 # TODO: threshold can be set from outside
-                if segment["no_speech_prob"] > 0.8:
+                if segment["no_speech_prob"] > self.no_speech_prob_threshold:
                     no_speech_segments.append((segment.get("start"), segment.get("end")))
 
         o = []
@@ -717,7 +721,7 @@ class VACOnlineASRProcessor(OnlineASRProcessor):
             ret = self.online.process_iter()
             return ret
         else:
-            print("no online update, only VAD", self.status, file=self.logfile)
+            logger.debug("no online update, only VAD", self.status, file=self.logfile)
             return (None, None, "")
 
     def finish(self):
@@ -772,6 +776,7 @@ def add_shared_args(parser):
     parser.add_argument('--lan', '--language', type=str, default='auto', help="Source language code, e.g. en,de,cs, or 'auto' for language detection.")
     parser.add_argument('--task', type=str, default='transcribe', choices=["transcribe","translate"],help="Transcribe or translate.")
     parser.add_argument('--backend', type=str, default="faster-whisper", choices=["faster-whisper", "whisper_timestamped", "mlx-whisper", "openai-api"],help='Load only this backend for Whisper processing.')
+    parser.add_argument('--nsp-threshold', type=float, default=None, help='Probability threshold that treats the sound as noise, and not speech. Default is 0.9 for faster-whisper and mlx-whisper backends, 0.8 for openai-api backend.')
     parser.add_argument('--vac', action="store_true", default=False, help='Use VAC = voice activity controller. Recommended. Requires torch.')
     parser.add_argument('--vac-chunk-size', type=float, default=0.04, help='VAC sample size in seconds.')
     parser.add_argument('--vad', action="store_true", default=False, help='Use VAD = voice activity detection, with the default parameters.')
@@ -786,12 +791,15 @@ def asr_factory(args, logfile=sys.stderr):
     backend = args.backend
     if backend == "openai-api":
         logger.debug("Using OpenAI API.")
-        asr = OpenaiApiASR(lan=args.lan)
+        nsp_threshold = args.nsp_threshold if args.nsp_threshold else 0.8
+        asr = OpenaiApiASR(lan=args.lan, nsp_threshold=nsp_threshold)
     else:
         if backend == "faster-whisper":
             asr_cls = FasterWhisperASR
+            nsp_threshold = args.nsp_threshold if args.nsp_threshold else 0.9
         elif backend == "mlx-whisper":
             asr_cls = MLXWhisper
+            nsp_threshold = args.nsp_threshold if args.nsp_threshold else 0.9
         else:
             asr_cls = WhisperTimestampedASR
 
@@ -799,7 +807,7 @@ def asr_factory(args, logfile=sys.stderr):
         size = args.model
         t = time.time()
         logger.info(f"Loading Whisper {size} model for {args.lan}...")
-        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir)
+        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_prob_threshold=nsp_threshold)
         e = time.time()
         logger.info(f"done. It took {round(e-t,2)} seconds.")
 

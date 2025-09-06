@@ -169,16 +169,39 @@ class ServerProcessor:
 
 # server loop
 
+# old code:
+#with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+#    s.bind((args.host, args.port))
+#    s.listen(1)
+#    logger.info('Listening on'+str((args.host, args.port)))
+#    while True:
+#        conn, addr = s.accept()
+#        logger.info('Connected to client on {}'.format(addr))
+#        connection = Connection(conn)
+#        proc = ServerProcessor(connection, online, args.min_chunk_size)
+#        proc.process()
+#        conn.close()
+#        logger.info('Connection to client closed')
+#logger.info('Connection closed, terminating.')
+
+
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind((args.host, args.port))
     s.listen(1)
-    logger.info('Listening on'+str((args.host, args.port)))
-    while True:
-        conn, addr = s.accept()
-        logger.info('Connected to client on {}'.format(addr))
-        connection = Connection(conn)
-        proc = ServerProcessor(connection, online, args.min_chunk_size)
-        proc.process()
-        conn.close()
-        logger.info('Connection to client closed')
-logger.info('Connection closed, terminating.')
+    logger.info(f"Listening on {(args.host, args.port)}")
+
+    try:
+        while True:
+            conn, addr = s.accept()
+            logger.info(f"Connected to client on {addr}")
+            try:
+                connection = Connection(conn)
+                proc = ServerProcessor(connection, online, args.min_chunk_size)
+                proc.process()
+            finally:
+                conn.close()
+                logger.info("Connection to client closed")
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, shutting down...")
+    finally:
+        logger.info("Connection closed, terminating.")
