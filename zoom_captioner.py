@@ -74,7 +74,8 @@ class MicProcessor:
         minlimit = int(self.min_chunk * SAMPLING_RATE)
         while sum(len(x) for x in out) < minlimit:
             try:
-                chunk = self.audio_queue.get(timeout=2)
+                # Get a chunk from audio queue. Timeout is slightly longer than minimum chunk duration.
+                chunk = self.audio_queue.get(timeout=self.min_chunk * 1.2)
             except queue.Empty:
                 break
             out.append(chunk)
@@ -133,36 +134,68 @@ class Translator:
         self.result_queue = result_queue
         self.current_text = ""
 
-    FLUSH_TIMEOUT = 8  # seconds
-    MAX_BUFFERED_TEXT_LENGTH = 200  # characters
+    FLUSH_TIMEOUT = 6  # seconds
+    LONG_BUFFERED_TEXT_LENGTH = 150  # characters
+    TOO_LONG_BUFFERED_TEXT_LENGTH = 200  # characters
+
+    def add_text(self, text: str):
+        # Append new text to the current buffer.
+        if text != "":
+            self.current_text += " " + text.strip()
+
+    def get_text_to_flush(self) -> str:
+        # Check for sentence-ending punctuation to flush.
+        s = self.current_text
+        for i, c in enumerate(s):
+            if s[i] in '.!?':
+                self.current_text = s[i + 1:]
+                return s[:i + 1]
+            
+        # No sentence end found. Is the text too long? Try to split at other punctuation characters,
+        # searching from the end to give as much context as possible.
+        if len(self.current_text) > self.LONG_BUFFERED_TEXT_LENGTH:
+            print(f"[Translator] flushing partial text (longer than {self.LONG_BUFFERED_TEXT_LENGTH} chars).", flush=True)
+            for i in range(len(s) - 1, -1, -1):
+                if s[i] in ',:;-–':
+                    self.current_text = s[i + 1:]
+                    return s[:i + 1]
+
+        # No punctuation and the current string is way too long? Flush everything.
+        if len(self.current_text) > self.TOO_LONG_BUFFERED_TEXT_LENGTH:
+            self.current_text = ""
+            print(f"[Translator] flushing very long partial text (longer than {self.TOO_LONG_BUFFERED_TEXT_LENGTH} chars).", flush=True)
+            return s
+
+        # Indicate that nothing is ready to flush
+        return ""
+    
+    def translate_text(self, text: str):
+        text_to_translate = f">>srp_Cyrl<< {text.strip()}"
+        inputs = self.tokenizer(text_to_translate, return_tensors="pt", truncation=True)
+        translated = self.translator.generate(**inputs)
+        transl_text = self.tokenizer.decode(translated[0], skip_special_tokens=True)
+        self.result_queue.put(transl_text)
 
     def run(self):
         while True:
             try:
-                text = self.source_queue.get(timeout=self.FLUSH_TIMEOUT)
+                timeout = self.FLUSH_TIMEOUT if self.current_text != "" else None
+                text = self.source_queue.get(timeout=timeout)
             except queue.Empty:
-                text = ""   # to flush partials
+                if self.current_text != "":
+                    print("[Translator] Timeout reached, flushing all current text.", flush=True)
+                    self.translate_text(self.current_text + "...")
+                    self.current_text = ""
+                continue
 
             if text is None:
                 break
-            elif text.strip() == "":
-                # make it flush partials
-                if self.current_text != "":
-                    self.current_text += "..."
-            else:
-                self.current_text += " " + text.strip()
 
-            if self.current_text.endswith(('.', '!', '?')) or len(self.current_text) > self.MAX_BUFFERED_TEXT_LENGTH:
-                if len(self.current_text) > self.MAX_BUFFERED_TEXT_LENGTH:
-                    print(f"[Translator] Warning: flushing long partial text (longer than {self.MAX_BUFFERED_TEXT_LENGTH} chars).", flush=True)
+            self.add_text(text)
 
-                text_to_translate = f">>srp_Cyrl<< {self.current_text.strip()}"
-                self.current_text = ""
-
-                inputs = self.tokenizer(text_to_translate, return_tensors="pt", truncation=True)
-                translated = self.translator.generate(**inputs)
-                transl_text = self.tokenizer.decode(translated[0], skip_special_tokens=True)
-                self.result_queue.put(transl_text)
+            while to_traslate := self.get_text_to_flush():
+                print(f"[Translator] To translate: {to_traslate}", flush=True)
+                self.translate_text(to_traslate)
 
 
 ########## Zoom captioner
