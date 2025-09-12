@@ -4,7 +4,6 @@ from transformers import MarianTokenizer, MarianMTModel
 from urllib.parse import urlparse, parse_qs
 import tkinter as tk
 
-import sys
 import argparse
 import os
 import logging
@@ -295,7 +294,7 @@ class OverlayCaptioner:
         self.start_x = 0
         self.start_y = 0
 
-        btn = tk.Button(self.root, text="X", command=self.root.destroy)
+        btn = tk.Button(self.root, text="X", fg="white", bg="black", command=self.root.destroy)
         btn.place(relx=1.0, y=0, anchor="ne") # anchor to top-right corner
 
         # get window and screen sizes
@@ -344,8 +343,23 @@ class OverlayCaptioner:
         self.root.mainloop()
 
     def update_label(self, text):
+        # get current bottom center point
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        win_w = self.root.winfo_width()
+        win_h = self.root.winfo_height()
+        bc_pt_x = x + win_w // 2
+        bc_pt_y = y + win_h
+
         self.label.config(text=text)
         self.root.update_idletasks()
+
+        # keep bottom center point fixed
+        new_win_w = self.root.winfo_width()
+        new_win_h = self.root.winfo_height()
+        new_x = bc_pt_x - new_win_w // 2
+        new_y = bc_pt_y - new_win_h
+        self.root.geometry(f"+{new_x}+{new_y}")
 
 
 ######### Main
