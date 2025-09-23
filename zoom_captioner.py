@@ -13,28 +13,15 @@ import queue
 import threading
 import requests
 import json
-
-logger = logging.getLogger(__name__)
-parser = argparse.ArgumentParser()
-
-# options from whisper_online
-add_shared_args(parser)
-parser.add_argument("--warmup-file", type=str, dest="warmup_file",
-        help="Path to wav file to warm up Whisper (optional).")
-parser.add_argument("--device", type=int, default=None,
-        help="Audio input device ID (default: system default)")
-parser.add_argument("--zoom-url", type=str, default=None,
-        help="Zoom meeting URL to send captions to. If not set, captions are only printed to the console.")
-
-args = parser.parse_args()
-set_logging(args, logger, other="")
+import re
 
 
 ######### Mic processor
 
 class ASRProcessor:
-    def __init__(self, min_chunk, result_queue):
-        self.min_chunk = min_chunk
+    def __init__(self, args, result_queue):
+        self.min_chunk_size = args.min_chunk_size
+        self.audio_input_device = args.audio_input_device
         self.last_end = None
         self.is_first = True
 
@@ -69,11 +56,11 @@ class ASRProcessor:
 
     def receive_audio_chunk(self):
         out = []
-        minlimit = int(self.min_chunk * self.SAMPLING_RATE)
+        minlimit = int(self.min_chunk_size * self.SAMPLING_RATE)
         while sum(len(x) for x in out) < minlimit:
             try:
                 # Get a chunk from audio queue. Timeout is slightly longer than minimum chunk duration.
-                chunk = self.audio_queue.get(timeout=self.min_chunk * 1.2)
+                chunk = self.audio_queue.get(timeout=self.min_chunk_size * 1.1)
             except queue.Empty:
                 break
             out.append(chunk)
@@ -105,7 +92,7 @@ class ASRProcessor:
             dtype="float32",
             blocksize=int(self.SAMPLING_RATE * 0.5),
             callback=self.audio_callback,
-            device=args.device
+            device=self.audio_input_device
         ):
             print("Listening from mic... Press Ctrl+C to stop.", flush=True)
             while not self.stop_event.is_set():
@@ -147,16 +134,34 @@ class Translator:
     def add_text(self, text: str):
         # Append new text to the current buffer.
         if text != "":
+            if self.current_text != "" and self.current_text[-1] != ' ' and text[0] != ' ':
+                self.current_text += ' '
             self.current_text += text
+
+    def get_sentence(self) -> str:
+        text = self.current_text
+        """
+        Extracts the first sentence from text, keeping consecutive punctuation.
+        Returns the sentence or an empty string if no sentence-ending punctuation is found.
+        """
+        # Regex: sentence until first [.!?], include all consecutive [.!?]
+        match = re.search(r'^(.*?[.!?]+)(\s*)(.*)$', text, flags=re.S)
+        if not match:
+            # no complete sentence, return the current partial text
+            return (self.current_text, False)
+
+        sentence = match.group(1).strip()
+        self.current_text = match.group(3).lstrip()
+        return (sentence, True)
 
     def get_text_to_flush(self) -> str:
         # Check for sentence-ending punctuation to flush.
         s = self.current_text
         for i, c in enumerate(s):
-            if s[i] in '.!?':
+            if c in '.!?':
                 self.current_text = s[i + 1:]
                 return s[:i + 1]
-            
+
         # No sentence end found. Is the text too long? Try to split at other punctuation characters,
         # searching from the end to give as much context as possible.
         if len(self.current_text) > self.LONG_BUFFERED_TEXT_LENGTH:
@@ -176,11 +181,11 @@ class Translator:
         return ""
 
     def translate_text(self, text: str):
-        text_to_translate = f">>srp_Cyrl<< {text.strip()}"
+        text_to_translate = f">>srp_Cyrl<< {text[0]}"
         inputs = self.tokenizer(text_to_translate, return_tensors="pt", truncation=True)
         translated = self.translator.generate(**inputs)
         transl_text = self.tokenizer.decode(translated[0], skip_special_tokens=True)
-        self.result_queue.put(transl_text)
+        self.result_queue.put((transl_text, text[1]))
 
     def run(self):
         while True:
@@ -190,7 +195,7 @@ class Translator:
             except queue.Empty:
                 if self.current_text != "":
                     print("[Translator] Timeout reached, flushing all current text.", flush=True)
-                    self.translate_text(self.current_text + "...")
+                    self.translate_text((self.current_text + "...", True))
                     self.current_text = ""
                 continue
 
@@ -199,9 +204,14 @@ class Translator:
 
             self.add_text(text)
 
-            while to_traslate := self.get_text_to_flush():
-                print(f"[Translator] To translate: {to_traslate}", flush=True)
-                self.translate_text(to_traslate)
+            while True:
+                to_translate = self.get_sentence()
+                if to_translate[0] != "":
+                    #print(f"[Translator] To translate ({"sentence" if to_translate[1] else "partial"}): {to_traslate[0]}", flush=True)
+                    self.translate_text(to_translate)
+
+                if not to_translate[1]:
+                    break
 
 
 ########## Zoom captioner
@@ -274,6 +284,8 @@ class ZoomCaptioner:
 ######### Overlay captioner
 
 class OverlayCaptioner:
+    font_size = 18
+
     def __init__(self, source_queue):
         self.source_queue = source_queue
         # Tkinter window for captions
@@ -284,18 +296,30 @@ class OverlayCaptioner:
         self.root.attributes("-alpha", 0.8)
         self.root.overrideredirect(True)   # remove title bar and border
 
-        self.label = tk.Label(self.root, text="", fg="white", bg="black", font=("Arial", 18), wraplength=800, justify="center")
+        self.label = tk.Label(self.root, text="", fg="white", bg="black", font=("Arial", self.font_size), wraplength=800, anchor="w", justify="left")
         self.label.pack(padx=20, pady=20)
 
-        self.current_text = ""
+        self.button_frame = tk.Frame(self.root)
+        self.button_frame.pack(side="bottom", padx=0, pady=0)
+
+        # Three buttons centered
+        font_inc = tk.Button(self.button_frame, text="⇧", fg="white", bg="black", command=self.increase_font_size)
+        font_dec = tk.Button(self.button_frame, text="⇩", fg="white", bg="black", command=self.decrease_font_size)
+        font_inc.pack(side="left", padx=0)
+        font_dec.pack(side="left", padx=0)
+
+        self.sentences = []
+        self.incomplete_sentence = ""
+        self.displ_text = ""
 
         self.root.bind("<Button-1>", self.start_move)
         self.root.bind("<B1-Motion>", self.do_move)
         self.start_x = 0
         self.start_y = 0
 
-        btn = tk.Button(self.root, text="X", fg="white", bg="black", command=self.root.destroy)
-        btn.place(relx=1.0, y=0, anchor="ne") # anchor to top-right corner
+        btn = tk.Button(self.button_frame, text="X", fg="white", bg="black", command=self.root.destroy)
+        #btn.place(relx=1.0, y=0, anchor="s") # anchor to top-right corner
+        btn.pack(side="left", padx=0)
 
         # get window and screen sizes
         self.root.update_idletasks()
@@ -324,25 +348,35 @@ class OverlayCaptioner:
 
     def run(self):
         while True:
-            text = self.source_queue.get()
+            text, complete = self.source_queue.get()
+            #print(f"[DEBUG] raw from queue: {text!r}, complete={complete}", flush=True)
             if text is None:
                 break
             elif not text.strip():
                 continue
 
-            print(f"Overlay Caption: {text}", flush=True)
+            #print(f"Overlay Caption: {text}", flush=True)
 
-            if self.current_text.endswith(('.', '!', '?')):
-                self.current_text = text
+            if complete:
+                self.sentences.append(text) # add the complete sentence
+                self.incomplete_sentence = ""
             else:
-                self.current_text += text
+                self.incomplete_sentence = text  # store the incomplete sentence
 
-            self.root.after(0, lambda: self.update_label(text=self.current_text))
+            self.sentences = self.sentences[-3:]  # keep only last 3 sentences
+            self.displ_text = "\n".join(self.sentences)
+            if self.incomplete_sentence:
+                if self.displ_text:
+                    self.displ_text += "\n"
+                self.displ_text += self.incomplete_sentence
+
+            if self.displ_text:
+                self.root.after(0, lambda: self.update_label(text=self.displ_text))
 
     def run_gui(self):
         self.root.mainloop()
 
-    def update_label(self, text):
+    def get_anchor_pt(self):
         # get current bottom center point
         x = self.root.winfo_x()
         y = self.root.winfo_y()
@@ -350,21 +384,63 @@ class OverlayCaptioner:
         win_h = self.root.winfo_height()
         bc_pt_x = x + win_w // 2
         bc_pt_y = y + win_h
+        return (bc_pt_x, bc_pt_y)
+    
+    def anchor_wnd_to_pt(self, pt_x, pt_y):
+        # keep bottom center point fixed
+        new_win_w = self.root.winfo_width()
+        new_win_h = self.root.winfo_height()
+        new_x = pt_x - new_win_w // 2
+        new_y = pt_y - new_win_h
+        self.root.geometry(f"+{new_x}+{new_y}")
+
+    def update_label(self, text):
+        bc_pt_x, bc_pt_y = self.get_anchor_pt()
 
         self.label.config(text=text)
         self.root.update_idletasks()
 
-        # keep bottom center point fixed
-        new_win_w = self.root.winfo_width()
-        new_win_h = self.root.winfo_height()
-        new_x = bc_pt_x - new_win_w // 2
-        new_y = bc_pt_y - new_win_h
-        self.root.geometry(f"+{new_x}+{new_y}")
+        self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
+
+    def increase_font_size(self):
+        if self.font_size < 42:
+            bc_pt_x, bc_pt_y = self.get_anchor_pt()
+
+            self.font_size += 2
+            self.label.config(font=("Arial", self.font_size))
+            self.root.update_idletasks()
+
+            self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
+
+    def decrease_font_size(self):
+        if self.font_size > 12:
+            bc_pt_x, bc_pt_y = self.get_anchor_pt()
+
+            self.font_size -= 2
+            self.label.config(font=("Arial", self.font_size))
+            self.root.update_idletasks()
+
+            self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
 
 
 ######### Main
 
-if __name__ == "__main__":
+def main(argv=None):
+    logger = logging.getLogger(__name__)
+    parser = argparse.ArgumentParser()
+
+    # options from whisper_online
+    add_shared_args(parser)
+    parser.add_argument("--warmup-file", type=str, dest="warmup_file",
+            help="Path to wav file to warm up Whisper (optional).")
+    parser.add_argument("--audio-input-device", type=int, default=None,
+            help="Audio input device ID (default: system default)")
+    parser.add_argument("--zoom-url", type=str, default=None,
+            help="Zoom meeting URL to send captions to. If not set, captions are only printed to the console.")
+
+    args = parser.parse_args(argv)
+    set_logging(args, logger, other="")
+
     asr_queue = queue.Queue()
     transl_queue = queue.Queue()
 
@@ -379,7 +455,7 @@ if __name__ == "__main__":
     print("Starting Captioner thread...", flush=True)
     if args.zoom_url:
         # to warm up Zoom captioner
-        transl_queue.put("...")
+        transl_queue.put(("...", True))
 
         zoomer = ZoomCaptioner(transl_queue, args.zoom_url, "sr")
         caption_thread = threading.Thread(target=zoomer.run, daemon=True)
@@ -390,7 +466,7 @@ if __name__ == "__main__":
         caption_thread.start()
 
         print("Starting ASR thread...", flush=True)
-        proc = ASRProcessor(args.min_chunk_size, asr_queue)
+        proc = ASRProcessor(args, asr_queue)
         asr_thread = threading.Thread(target=proc.run, daemon=True)
         asr_thread.start()
 
@@ -398,7 +474,7 @@ if __name__ == "__main__":
         if not overlay:
             # If Zoom captioner is used, run ASR in the main thread
             print("Starting ASR loop...", flush=True)
-            proc = ASRProcessor(args.min_chunk_size, asr_queue)
+            proc = ASRProcessor(args, asr_queue)
             proc.run()
         else:
             # If overlay captioner is used, run Tkinter mainloop in the main thread
@@ -412,7 +488,7 @@ if __name__ == "__main__":
         print("Stopping all threads...", flush=True)
         # signal the end of processing
         asr_queue.put(None)
-        transl_queue.put(None)
+        transl_queue.put((None, None))
 
     if asr_thread:
         # signal ASR thread to stop
@@ -425,3 +501,8 @@ if __name__ == "__main__":
 
     print("Captioner thread exiting...", flush=True)
     caption_thread.join()
+
+
+if __name__ == "__main__":
+    import sys
+    main(sys.argv[1:])

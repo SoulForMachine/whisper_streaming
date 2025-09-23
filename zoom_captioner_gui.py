@@ -53,7 +53,8 @@ def str_to_float(s):
 
 
 class ZoomCaptionerUI:
-    def __init__(self, root):
+    def __init__(self):
+        root = tk.Tk()
         self.root = root
         self.root.title("Zoom Captioner")
         self.root.resizable(False, False)  # make window non-resizable
@@ -91,6 +92,20 @@ class ZoomCaptionerUI:
         self.model_combo = ttk.Combobox(root, textvariable=self.model_var, values=model_options, state="readonly")
         self.model_combo.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
 
+        # --- Whisper device ---
+        row_idx = self.next_row()
+        tk.Label(root, text="Whisper device").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.whisper_device_var = tk.StringVar(value="cuda")
+        self.whisper_device_combo = ttk.Combobox(root, textvariable=self.whisper_device_var, values=["cuda", "cpu"], state="readonly")
+        self.whisper_device_combo.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
+
+        # --- Whisper compute type ---
+        row_idx = self.next_row()
+        tk.Label(root, text="Whisper compute type").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.whisper_compute_type_var = tk.StringVar(value="int8")
+        self.whisper_compute_type_combo = ttk.Combobox(root, textvariable=self.whisper_compute_type_var, values=["int8", "int8_float16", "float16", "float32"], state="readonly")
+        self.whisper_compute_type_combo.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
+
         # --- Speech language ---
         row_idx = self.next_row()
         tk.Label(root, text="Speech language").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
@@ -113,16 +128,23 @@ class ZoomCaptionerUI:
         tk.Label(root, text="Warmup file").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.warmup_var = tk.StringVar(value="samples_jfk.wav")
         self.warmup_entry = ttk.Entry(root, textvariable=self.warmup_var)
-        self.warmup_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
+        self.warmup_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.warmup_btn = ttk.Button(root, text="Browse...", command=self.browse_file)
-        self.warmup_btn.grid(row=row_idx, column=2, sticky="ew", padx=5, pady=5)
+        self.warmup_btn.grid(row=row_idx, column=3, sticky="ew", padx=5, pady=5)
 
         # --- Non-speech probability threshold ---
         row_idx = self.next_row()
         tk.Label(root, text="Non-speech probability\nthreshold", justify="left", anchor="w").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.threshold_var = tk.StringVar(value="0.95")
+        self.threshold_var = tk.StringVar(value="1.0")
         self.threshold_entry = ttk.Entry(root, textvariable=self.threshold_var)
         self.threshold_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
+
+        # --- Minimum chunk size ---
+        row_idx = self.next_row()
+        tk.Label(root, text="Minimum chunk size (sec)", justify="left", anchor="w").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.min_chunk_size_var = tk.StringVar(value="0.5")
+        self.min_chunk_size_entry = ttk.Entry(root, textvariable=self.min_chunk_size_var)
+        self.min_chunk_size_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
 
         # --- Checkboxes ---
         row_idx = self.next_row()
@@ -153,16 +175,20 @@ class ZoomCaptionerUI:
         # Collect all values for debugging/demo purposes
         print("Zoom URL:", self.zoom_url_var.get())
         print("Audio device:", self.audio_device_combo.get())
-        print("Model:", self.model_var.get())
+        print("Whisper model:", self.model_var.get())
+        print("Whisper device:", self.whisper_device_var.get())
+        print("Whisper compute type:", self.whisper_compute_type_var.get())
         print("Language:", self.lang_var.get())
         print("Enable translation:", self.enable_translation_var.get())
         print("Target language:", self.target_lang_var.get())
         print("Warmup file:", self.warmup_var.get())
         print("Threshold:", self.threshold_var.get())
+        print("Minimum chunk size:", self.min_chunk_size_var.get())
         print("VAC enabled:", self.vac_var.get())
         print("VAD enabled:", self.vad_var.get())
 
-        self.run_zoom_captioner(capture_output=False)
+        print("Running Zoom captioner...")
+        self.run_zoom_captioner()
 
     def on_enable_translation_toggle(self):
         if self.enable_translation_var.get():
@@ -186,26 +212,34 @@ class ZoomCaptionerUI:
                 break
         return dev_index
     
-    def run_zoom_captioner(self, capture_output=True):
-        import subprocess
+    def run_zoom_captioner(self):
+        import zoom_captioner
 
         dev_index = self.get_selected_device_index()
 
         threshold, valid = str_to_float(self.threshold_var.get())
         if not valid or not (0.0 <= threshold <= 1.0):
-            print("Error: Non-speech probability threshold must be a number between 0.0 and 1.0. Setting to default 0.95.")
-            threshold = 0.95
+            print("Error: Non-speech probability threshold must be a number between 0.0 and 1.0. Setting to default: 1.0")
+            threshold = 1.0
+
+        min_chunk_size, valid = str_to_float(self.min_chunk_size_var.get())
+        if not valid:
+            print("Error: Invalid minimum chunk size. Setting to default: 0.5")
+            min_chunk_size = 0.5
 
         zoom_url = self.zoom_url_var.get().strip()
 
         args = [
-            "--device", str(dev_index) if dev_index is not None else "1",
+            "--audio-input-device", str(dev_index) if dev_index is not None else "1",
             "--model", self.model_var.get(),
+            "--whisper-device", self.whisper_device_var.get(),
+            "--whisper-compute-type", self.whisper_compute_type_var.get(),
             "--language", self.lang_var.get() == "English" and "en" or "sr",
             #"--enable_translation", str(self.enable_translation_var.get()),
             #"--target_language", self.target_lang_var.get(),
             "--warmup-file", self.warmup_var.get(),
             "--nsp-threshold", str(threshold),
+            "--min-chunk-size", str(min_chunk_size),
             "-l", "INFO"
         ]
 
@@ -216,19 +250,14 @@ class ZoomCaptionerUI:
 
         if zoom_url:
             args.append("--zoom-url")
-            args.append(f"\"{zoom_url}\"")
+            args.append(zoom_url)
 
-        cmd = [sys.executable, "zoom_captioner.py"] + args
+        return zoom_captioner.main(args)
 
-        if capture_output:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            return result.returncode, result.stdout, result.stderr
-        else:
-            return subprocess.run(cmd).returncode
-
+    def run_gui(self):
+        self.root.mainloop()
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ZoomCaptionerUI(root)
-    root.mainloop()
+    app = ZoomCaptionerUI()
+    app.run_gui()

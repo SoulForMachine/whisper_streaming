@@ -31,7 +31,7 @@ class ASRBase:
     sep = " "   # join transcribe words with this character (" " for whisper_timestamped,
                 # "" for faster-whisper because it emits the spaces when neeeded)
 
-    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr, no_speech_prob_threshold=0.9):
+    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr, no_speech_prob_threshold=0.9, device="cuda", compute_type="float32"):
         self.logfile = logfile
 
         self.transcribe_kargs = {}
@@ -40,10 +40,11 @@ class ASRBase:
         else:
             self.original_language = lan
 
-        self.model = self.load_model(modelsize, cache_dir, model_dir)
-
         self.no_speech_prob_threshold = no_speech_prob_threshold
+        self.device = device
+        self.compute_type = compute_type
 
+        self.model = self.load_model(modelsize, cache_dir, model_dir)
 
     def load_model(self, modelsize, cache_dir):
         raise NotImplemented("must be implemented in the child class")
@@ -118,7 +119,12 @@ class FasterWhisperASR(ASRBase):
 
 
         # this worked fast and reliably on NVIDIA L40
-        model = WhisperModel(model_size_or_path, device="cuda", compute_type="default", download_root=cache_dir)
+        import torch
+        device = self.device
+        if device == "cuda" and not torch.cuda.is_available():
+            print("CUDA not available, using CPU", file=self.logfile, flush=True)
+            device = "cpu"
+        model = WhisperModel(model_size_or_path, device=device, compute_type=self.compute_type, download_root=cache_dir)
 
         # or run on GPU with INT8
         # tested: the transcripts were different, probably worse than with FP16, and it was slightly (appx 20%) slower
@@ -782,6 +788,8 @@ def add_shared_args(parser):
     parser.add_argument('--vad', action="store_true", default=False, help='Use VAD = voice activity detection, with the default parameters.')
     parser.add_argument('--buffer_trimming', type=str, default="segment", choices=["sentence", "segment"],help='Buffer trimming strategy -- trim completed sentences marked with punctuation mark and detected by sentence segmenter, or the completed segments returned by Whisper. Sentence segmenter must be installed for "sentence" option.')
     parser.add_argument('--buffer_trimming_sec', type=float, default=15, help='Buffer trimming length threshold in seconds. If buffer length is longer, trimming sentence/segment is triggered.')
+    parser.add_argument('--whisper-device', type=str, default="cuda", choices=['cuda', 'cpu'], help='Device to use when running the Whisper model. Default is cuda.')
+    parser.add_argument('--whisper-compute-type', type=str, default="float32", choices=['int8', 'int8_float16', 'float16', 'float32'], help='Compute type to use when running the Whisper model. Default is float32.')
     parser.add_argument("-l", "--log-level", dest="log_level", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the log level", default='DEBUG')
 
 def asr_factory(args, logfile=sys.stderr):
@@ -792,7 +800,7 @@ def asr_factory(args, logfile=sys.stderr):
     if backend == "openai-api":
         logger.debug("Using OpenAI API.")
         nsp_threshold = args.nsp_threshold if args.nsp_threshold else 0.8
-        asr = OpenaiApiASR(lan=args.lan, nsp_threshold=nsp_threshold)
+        asr = OpenaiApiASR(lan=args.lan, no_speech_prob_threshold=nsp_threshold)
     else:
         if backend == "faster-whisper":
             asr_cls = FasterWhisperASR
@@ -807,7 +815,7 @@ def asr_factory(args, logfile=sys.stderr):
         size = args.model
         t = time.time()
         logger.info(f"Loading Whisper {size} model for {args.lan}...")
-        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_prob_threshold=nsp_threshold)
+        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_prob_threshold=nsp_threshold, device=args.whisper_device, compute_type=args.whisper_compute_type)
         e = time.time()
         logger.info(f"done. It took {round(e-t,2)} seconds.")
 
