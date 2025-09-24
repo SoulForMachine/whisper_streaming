@@ -34,8 +34,19 @@ def audio_server(host="0.0.0.0", port=5000, processor=None):
 
     # Step 3: receive audio chunks
     while True:
-        arr = ccmn.recv_ndarray(conn)
+        try:
+            arr = ccmn.recv_ndarray(conn)
+        except (ConnectionResetError, OSError) as e:
+            print(f"Connection lost: {e}.")
+            break
         if arr is None:
+            continue
+
+        if len(arr) == 0:
+            ccmn.send_json(conn, {
+                "type": "status",
+                "value": "shutdown"
+            })
             break
 
         print(f"Received chunk with shape {arr.shape}")
@@ -59,4 +70,4 @@ def audio_server(host="0.0.0.0", port=5000, processor=None):
     srv.close()
 
 if __name__ == "__main__":
-    audio_server(host="localhost")
+    audio_server()

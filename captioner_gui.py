@@ -407,6 +407,7 @@ class WhisperClient:
         self.params = params
         self.audio_queue = audio_queue
         self.connected_event = threading.Event()
+        self.results_thread = None
 
     def run(self):
         try:
@@ -420,7 +421,8 @@ class WhisperClient:
         ccmn.send_json(sock, self.params)
 
         # Step 2: if zoom_url empty, start a thread to receive results
-        threading.Thread(target=self.listen_for_results, args=(sock,), daemon=True).start()
+        self.results_thread = threading.Thread(target=self.listen_for_results, args=(sock,), daemon=True)
+        self.results_thread.start()
 
         # Step 3: stream audio
         try:
@@ -429,6 +431,8 @@ class WhisperClient:
                 if chunk is None:
                     # Tell the server we're done
                     ccmn.send_ndarray(sock, np.array([], dtype=np.float32))
+                    self.results_thread.join()
+                    self.results_thread = None
                     break
                 ccmn.send_ndarray(sock, chunk)
         except (BrokenPipeError, ConnectionResetError) as e:
@@ -446,10 +450,12 @@ class WhisperClient:
                 break
 
             if msg is None:
-                break
+                continue
 
             if msg["type"] == "status":
                 print("Server status:", msg["value"])
+                if msg["value"] == "shutdown":
+                    break
             elif msg["type"] == "translation":
                 print(f"[{msg['lang']}]{' (partial)' if msg['partial'] else ''}: {msg['text']}")
             else:
