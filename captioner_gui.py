@@ -77,12 +77,16 @@ class CaptionerUI:
         self.audio_thread = None
         self.audio_listener = None
         self.audio_queue = None
+        self.whisper_client = None
+        self.whisper_client_thread = None
+        self.captions_overlay = None
+        self.captions_thread = None
 
     def setup_ui(self):
         root = tk.Tk()
-        self.root = root
-        self.root.title("Zoom Captioner")
-        self.root.resizable(False, False)  # make window non-resizable
+        self.root_wnd = root
+        self.root_wnd.title("Zoom Captioner")
+        self.root_wnd.resizable(False, False)  # make window non-resizable
         self.row_i = 0  # to keep track of grid row index
 
         # --- Whisper Server URL ---
@@ -118,7 +122,7 @@ class CaptionerUI:
         # --- Whisper model ---
         row_idx = self.next_row()
         tk.Label(root, text="Whisper model").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.model_var = tk.StringVar(value="small.en")
+        self.model_var = tk.StringVar(value="tiny.en")
         model_options = [
             "tiny.en", "tiny", "base.en", "base", "small.en", "small",
             "medium.en", "medium",
@@ -137,7 +141,7 @@ class CaptionerUI:
         # --- Whisper compute type ---
         row_idx = self.next_row()
         tk.Label(root, text="Whisper compute type").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.whisper_compute_type_var = tk.StringVar(value="int8")
+        self.whisper_compute_type_var = tk.StringVar(value="float32")
         self.whisper_compute_type_combo = ttk.Combobox(root, textvariable=self.whisper_compute_type_var, values=["int8", "int8_float16", "float16", "float32"], state="readonly")
         self.whisper_compute_type_combo.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
 
@@ -170,14 +174,14 @@ class CaptionerUI:
         # --- Non-speech probability threshold ---
         row_idx = self.next_row()
         tk.Label(root, text="Non-speech probability\nthreshold", justify="left", anchor="w").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.threshold_var = tk.StringVar(value="1.0")
+        self.threshold_var = tk.StringVar(value="0.95")
         self.threshold_entry = ttk.Entry(root, textvariable=self.threshold_var)
         self.threshold_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
 
         # --- Minimum chunk size ---
         row_idx = self.next_row()
         tk.Label(root, text="Minimum chunk size (sec)", justify="left", anchor="w").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.min_chunk_size_var = tk.StringVar(value="0.5")
+        self.min_chunk_size_var = tk.StringVar(value="0.6")
         self.min_chunk_size_entry = ttk.Entry(root, textvariable=self.min_chunk_size_var)
         self.min_chunk_size_entry.grid(row=row_idx, column=1, sticky="ew", padx=5, pady=5)
 
@@ -256,8 +260,12 @@ class CaptionerUI:
 
     def run_captioner(self):
         self.audio_queue = queue.Queue()
+        self.resuts_queue = queue.Queue()
         self.connect_to_server()
         self.run_audio_listener()
+
+        if not self.zoom_url_var.get().strip():
+            self.run_captions_overlay()
 
     def connect_to_server(self):
         threshold, valid = str_to_float(self.threshold_var.get())
@@ -291,9 +299,14 @@ class CaptionerUI:
             "vad": self.vad_var.get(),
         }
 
-        self.whisper_client = WhisperClient(self.server_url_var.get().strip(), port, params, self.audio_queue)
+        self.whisper_client = WhisperClient(self.server_url_var.get().strip(), port, params, self.audio_queue, self.resuts_queue)
         self.whisper_client_thread = threading.Thread(target=self.whisper_client.run, daemon=True)
         self.whisper_client_thread.start()
+
+    def run_captions_overlay(self):
+        self.captions_overlay = CaptionsOverlay(self.root_wnd, self.resuts_queue)
+        self.captions_thread = threading.Thread(target=self.captions_overlay.run, daemon=True)
+        self.captions_thread.start()
 
     def run_audio_listener(self):
         dev_index = self.get_selected_device_index()
@@ -322,10 +335,17 @@ class CaptionerUI:
             self.whisper_client = None
             self.whisper_client_thread = None
 
+        if self.captions_overlay:
+            self.captions_overlay.stop()
+            self.captions_thread.join()
+            self.captions_overlay = None
+            self.captions_thread = None
+
         self.audio_queue = None
+        self.resuts_queue = None
 
     def run_gui(self):
-        self.root.mainloop()
+        self.root_wnd.mainloop()
 
 
 class AudioListener:
@@ -401,11 +421,12 @@ class AudioListener:
 
 
 class WhisperClient:
-    def __init__(self, server_url: str, port: int, params: map, audio_queue: queue.Queue):
+    def __init__(self, server_url: str, port: int, params: map, audio_queue: queue.Queue, results_queue: queue.Queue = None):
         self.server_url = server_url
         self.port = port
         self.params = params
         self.audio_queue = audio_queue
+        self.results_queue = results_queue
         self.connected_event = threading.Event()
         self.results_thread = None
 
@@ -420,7 +441,7 @@ class WhisperClient:
         # Step 1: send params JSON
         ccmn.send_json(sock, self.params)
 
-        # Step 2: if zoom_url empty, start a thread to receive results
+        # Step 2: start a thread to receive results
         self.results_thread = threading.Thread(target=self.listen_for_results, args=(sock,), daemon=True)
         self.results_thread.start()
 
@@ -441,7 +462,7 @@ class WhisperClient:
         sock.close()
 
     def listen_for_results(self, sock):
-        """Receive status and translation messages from server."""
+        # Receive status and translation messages from the server.
         while True:
             try:
                 msg = ccmn.recv_json(sock)
@@ -453,16 +474,159 @@ class WhisperClient:
                 continue
 
             if msg["type"] == "status":
-                print("Server status:", msg["value"])
                 if msg["value"] == "shutdown":
                     break
             elif msg["type"] == "translation":
-                print(f"[{msg['lang']}]{' (partial)' if msg['partial'] else ''}: {msg['text']}")
+                #print(f"[{msg['lang']}]{' (complete)' if msg['complete'] else ''}: {msg['text']}")
+                if self.results_queue:
+                    self.results_queue.put((msg['text'], msg['complete']))
             else:
-                print("Unknown message:", msg)
+                print("Unknown message: ", msg)
 
     def stop(self):
         self.audio_queue.put(None)
+
+
+class CaptionsOverlay:
+    font_size = 18
+
+    def __init__(self, root_wnd, source_queue):
+        self.source_queue = source_queue
+        # Tkinter window for captions
+        self.overlay_wnd = tk.Toplevel(root_wnd)
+        self.overlay_wnd.title("Live Captions")
+        self.overlay_wnd.configure(bg="black")
+        self.overlay_wnd.attributes("-topmost", True)
+        self.overlay_wnd.attributes("-alpha", 0.8)
+        self.overlay_wnd.overrideredirect(True)   # remove title bar and border
+
+        self.label = tk.Label(self.overlay_wnd, text="", fg="white", bg="black", font=("Arial", self.font_size), wraplength=800, anchor="w", justify="left")
+        self.label.pack(padx=20, pady=20)
+
+        self.button_frame = tk.Frame(self.overlay_wnd)
+        self.button_frame.pack(side="bottom", padx=0, pady=0)
+
+        # Three buttons centered
+        font_inc = tk.Button(self.button_frame, text="⇧", fg="white", bg="black", command=self.increase_font_size)
+        font_dec = tk.Button(self.button_frame, text="⇩", fg="white", bg="black", command=self.decrease_font_size)
+        font_inc.pack(side="left", padx=0)
+        font_dec.pack(side="left", padx=0)
+
+        self.sentences = []
+        self.incomplete_sentence = ""
+        self.displ_text = ""
+
+        self.overlay_wnd.bind("<Button-1>", self.start_move)
+        self.overlay_wnd.bind("<B1-Motion>", self.do_move)
+        self.start_x = 0
+        self.start_y = 0
+
+        btn = tk.Button(self.button_frame, text="X", fg="white", bg="black", command=self.overlay_wnd.destroy)
+        #btn.place(relx=1.0, y=0, anchor="s") # anchor to top-right corner
+        btn.pack(side="left", padx=0)
+
+        # get window and screen sizes
+        self.overlay_wnd.update_idletasks()
+        win_w = self.overlay_wnd.winfo_width()
+        win_h = self.overlay_wnd.winfo_height()
+        scr_w = self.overlay_wnd.winfo_screenwidth()
+        scr_h = self.overlay_wnd.winfo_screenheight()
+
+        # distance from bottom (pixels)
+        margin_bottom = 100  
+
+        # calculate position
+        x = (scr_w // 2) - (win_w // 2)    # center horizontally
+        y = scr_h - win_h - margin_bottom  # margin from bottom
+
+        self.overlay_wnd.geometry(f"+{x}+{y}")
+
+    def start_move(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+
+    def do_move(self, event):
+        x = self.overlay_wnd.winfo_x() + (event.x - self.start_x)
+        y = self.overlay_wnd.winfo_y() + (event.y - self.start_y)
+        self.overlay_wnd.geometry(f"+{x}+{y}")
+
+    def run(self):
+        while True:
+            text, complete = self.source_queue.get()
+            #print(f"[DEBUG] raw from queue: {text!r}, complete={complete}", flush=True)
+            if text is None:
+                break
+            elif not text.strip():
+                continue
+
+            #print(f"Overlay Caption: {text}", flush=True)
+
+            if complete:
+                self.sentences.append(text) # add the complete sentence
+                self.incomplete_sentence = ""
+            else:
+                self.incomplete_sentence = text  # store the incomplete sentence
+
+            self.sentences = self.sentences[-3:]  # keep only last 3 sentences
+            self.displ_text = "\n".join(self.sentences)
+            if self.incomplete_sentence:
+                if self.displ_text:
+                    self.displ_text += "\n"
+                self.displ_text += self.incomplete_sentence
+
+            if self.displ_text:
+                self.overlay_wnd.after(0, lambda: self.update_label(text=self.displ_text))
+
+    def stop(self):
+        self.source_queue.put((None, True))  # signal to stop
+        self.overlay_wnd.destroy()
+
+    def get_anchor_pt(self):
+        # get current bottom center point
+        x = self.overlay_wnd.winfo_x()
+        y = self.overlay_wnd.winfo_y()
+        win_w = self.overlay_wnd.winfo_width()
+        win_h = self.overlay_wnd.winfo_height()
+        bc_pt_x = x + win_w // 2
+        bc_pt_y = y + win_h
+        return (bc_pt_x, bc_pt_y)
+    
+    def anchor_wnd_to_pt(self, pt_x, pt_y):
+        # keep bottom center point fixed
+        new_win_w = self.overlay_wnd.winfo_width()
+        new_win_h = self.overlay_wnd.winfo_height()
+        new_x = pt_x - new_win_w // 2
+        new_y = pt_y - new_win_h
+        self.overlay_wnd.geometry(f"+{new_x}+{new_y}")
+
+    def update_label(self, text):
+        bc_pt_x, bc_pt_y = self.get_anchor_pt()
+
+        self.label.config(text=text)
+        self.overlay_wnd.update_idletasks()
+
+        self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
+
+    def increase_font_size(self):
+        if self.font_size < 42:
+            bc_pt_x, bc_pt_y = self.get_anchor_pt()
+
+            self.font_size += 2
+            self.label.config(font=("Arial", self.font_size))
+            self.overlay_wnd.update_idletasks()
+
+            self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
+
+    def decrease_font_size(self):
+        if self.font_size > 12:
+            bc_pt_x, bc_pt_y = self.get_anchor_pt()
+
+            self.font_size -= 2
+            self.label.config(font=("Arial", self.font_size))
+            self.overlay_wnd.update_idletasks()
+
+            self.anchor_wnd_to_pt(bc_pt_x, bc_pt_y)
+
 
 if __name__ == "__main__":
     app = CaptionerUI()
