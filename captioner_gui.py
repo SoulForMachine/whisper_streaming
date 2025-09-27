@@ -1,5 +1,4 @@
 import sys
-import os
 import socket
 import queue
 import threading
@@ -8,10 +7,6 @@ import sounddevice as sd
 import tkinter as tk
 from tkinter import ttk, filedialog
 import logging
-
-# Ensure current directory is in sys.path for local imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import captioner_common as ccmn
 
 logger = logging.getLogger(__name__)
@@ -215,6 +210,7 @@ class CaptionerUI:
             self.stop_captioner()
             self.start_btn.config(text="Start")
             self.is_running = False
+            print("Captioner stopped.")
         else:
             # Collect all values for debugging/demo purposes
             print("Zoom URL:", self.zoom_url_var.get())
@@ -231,7 +227,7 @@ class CaptionerUI:
             print("VAC enabled:", self.vac_var.get())
             print("VAD enabled:", self.vad_var.get())
 
-            print("Running Zoom captioner...")
+            print("Running Captioner...")
             self.run_captioner()
             self.start_btn.config(text="Stop")
             self.is_running = True
@@ -311,14 +307,19 @@ class CaptionerUI:
     def run_audio_listener(self):
         dev_index = self.get_selected_device_index()
 
-        audio_input_device = dev_index if dev_index is not None else 1
+        if dev_index is not None:
+            audio_input_device = dev_index 
+            audio_input_device_name = self.audio_device_combo.get()
+        else:
+            audio_input_device = self.default_input_device_index()
+            audio_input_device_name = self.device_map.keys()[audio_input_device]
 
         min_chunk_size, valid = str_to_float(self.min_chunk_size_var.get())
         if not valid:
             print("Error: Invalid minimum chunk size. Setting to default: 0.6")
             min_chunk_size = 0.6
 
-        self.audio_listener = AudioListener(min_chunk_size, audio_input_device, self.audio_queue)
+        self.audio_listener = AudioListener(min_chunk_size, audio_input_device, audio_input_device_name, self.audio_queue)
         self.audio_thread = threading.Thread(target=self.audio_listener.run, daemon=True)
         self.audio_thread.start()
 
@@ -349,9 +350,10 @@ class CaptionerUI:
 
 
 class AudioListener:
-    def __init__(self, min_chunk_size: float, audio_input_device: int, result_queue: queue.Queue):
+    def __init__(self, min_chunk_size: float, audio_input_device: int, audio_input_device_name: str, result_queue: queue.Queue):
         self.min_chunk_size = min_chunk_size
         self.audio_input_device = audio_input_device
+        self.audio_input_device_name = audio_input_device_name
         self.last_end = None
         self.is_first = True
 
@@ -408,7 +410,7 @@ class AudioListener:
             callback=self.audio_callback,
             device=self.audio_input_device
         ):
-            print(f"Listening to {self.audio_input_device}.", flush=True)
+            print(f"Listening to {self.audio_input_device_name}.", flush=True)
             while not self.stop_event.is_set():
                 chunk = self.receive_audio_chunk()
                 if chunk is None or len(chunk) == 0:
