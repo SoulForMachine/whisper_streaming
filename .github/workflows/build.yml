@@ -1,0 +1,54 @@
+name: macOS App Build
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+jobs:
+  build-macos:
+    runs-on: macos-12   # target Monterey for wider compatibility
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Set version string
+        run: echo "VERSION=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+
+      - name: Build .app bundle
+        run: |
+          echo "InternalName=Captioner" > version.txt
+          echo "ProductName=Captioner" >> version.txt
+          echo "FileVersion=${VERSION}" >> version.txt
+          echo "ProductVersion=${VERSION}" >> version.txt
+          pyinstaller --noconfirm --windowed --name "Captioner-${VERSION}" --version-file=version.txt captioner_gui.py
+
+      - name: Ad-hoc codesign the app
+        run: |
+          codesign --deep --force --sign - dist/Captioner-${VERSION}.app
+
+      - name: Remove quarantine attribute
+        run: |
+          xattr -cr dist/MyApp-${VERSION}.app
+
+      - name: Zip outputs
+        run: |
+          cd dist
+          zip -r Captioner-app-${VERSION}.zip Captioner-${VERSION}.app
+          zip -r Captioner-exec-${VERSION}.zip Captioner-${VERSION}.app/Contents/MacOS/Captioner-${VERSION}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: dist/*.zip
