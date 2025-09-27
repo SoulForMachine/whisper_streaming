@@ -1,0 +1,14 @@
+# UTF-8
+# File generated for PyInstaller
+
+# Internal name of the app
+InternalName=Captioner
+
+# Displayed product name
+ProductName=Captioner
+
+# File version (visible in Info.plist)
+FileVersion=0.5.0
+
+# Product version
+ProductVersion=0.5.0
