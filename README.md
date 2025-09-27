@@ -266,4 +266,3 @@ Credits:
 ## Contact
 
 Dominik Macháček, machacek@ufal.mff.cuni.cz
-
