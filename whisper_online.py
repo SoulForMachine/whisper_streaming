@@ -779,7 +779,7 @@ def add_shared_args(parser):
     parser.add_argument('--model', type=str, default='large-v2', choices="tiny.en,tiny,base.en,base,small.en,small,medium.en,medium,large-v1,large-v2,large-v3,large,large-v3-turbo".split(","),help="Name size of the Whisper model to use (default: large-v2). The model is automatically downloaded from the model hub if not present in model cache dir.")
     parser.add_argument('--model_cache_dir', type=str, default=None, help="Overriding the default model cache dir where models downloaded from the hub are saved")
     parser.add_argument('--model_dir', type=str, default=None, help="Dir where Whisper model.bin and other files are saved. This option overrides --model and --model_cache_dir parameter.")
-    parser.add_argument('--lan', '--language', type=str, default='auto', help="Source language code, e.g. en,de,cs, or 'auto' for language detection.")
+    parser.add_argument('--lan', '--language', dest="language", type=str, default='auto', help="Source language code, e.g. en,de,cs, or 'auto' for language detection.")
     parser.add_argument('--task', type=str, default='transcribe', choices=["transcribe","translate"],help="Transcribe or translate.")
     parser.add_argument('--backend', type=str, default="faster-whisper", choices=["faster-whisper", "whisper_timestamped", "mlx-whisper", "openai-api"],help='Load only this backend for Whisper processing.')
     parser.add_argument('--nsp-threshold', type=float, default=None, help='Probability threshold that treats the sound as noise, and not speech. Default is 0.9 for faster-whisper and mlx-whisper backends, 0.8 for openai-api backend.')
@@ -800,7 +800,7 @@ def asr_factory(args, logfile=sys.stderr):
     if backend == "openai-api":
         logger.debug("Using OpenAI API.")
         nsp_threshold = args.nsp_threshold if args.nsp_threshold else 0.8
-        asr = OpenaiApiASR(lan=args.lan, no_speech_prob_threshold=nsp_threshold)
+        asr = OpenaiApiASR(lan=args.language, no_speech_prob_threshold=nsp_threshold)
     else:
         if backend == "faster-whisper":
             asr_cls = FasterWhisperASR
@@ -814,8 +814,11 @@ def asr_factory(args, logfile=sys.stderr):
         # Only for FasterWhisperASR and WhisperTimestampedASR
         size = args.model
         t = time.time()
-        logger.info(f"Loading Whisper {size} model for {args.lan}...")
-        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_prob_threshold=nsp_threshold, device=args.whisper_device, compute_type=args.whisper_compute_type)
+        logger.info(f"Loading Whisper {size} model for {args.language}...")
+        logger.info(f"  - device: {args.whisper_device}")
+        logger.info(f"  - compute type: {args.whisper_compute_type}")
+        logger.info(f"  - nsp threshold: {nsp_threshold}")
+        asr = asr_cls(modelsize=size, lan=args.language, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_prob_threshold=nsp_threshold, device=args.whisper_device, compute_type=args.whisper_compute_type)
         e = time.time()
         logger.info(f"done. It took {round(e-t,2)} seconds.")
 
@@ -824,7 +827,7 @@ def asr_factory(args, logfile=sys.stderr):
         logger.info("Setting VAD filter")
         asr.use_vad()
 
-    language = args.lan
+    language = args.language
     if args.task == "translate":
         asr.set_translate_task()
         tgt_language = "en"  # Whisper translates into English

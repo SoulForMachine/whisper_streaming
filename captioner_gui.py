@@ -393,16 +393,6 @@ class AudioListener:
         self.is_first = False
         return conc
 
-    def format_output_transcript(self, o):
-        if o[0] is not None:
-            beg, end = o[0]*1000, o[1]*1000
-            if self.last_end is not None:
-                beg = max(beg, self.last_end)
-            self.last_end = end
-            print("%1.0f %1.0f %s" % (beg,end,o[2]), flush=True)
-        else:
-            logger.debug("No text in this segment")
-
     def run(self):
         with sd.InputStream(
             samplerate=self.SAMPLING_RATE,

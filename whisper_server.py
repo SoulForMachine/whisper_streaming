@@ -1,6 +1,5 @@
 import socket
 import captioner_common as ccmn
-from whisper_online import *
 from transformers import MarianTokenizer, MarianMTModel
 from urllib.parse import urlparse, parse_qs
 import multiprocessing as mp
@@ -18,31 +17,45 @@ import re
 ######### WhisperOnline
 
 class WhisperOnline:
-    def __init__(self, args):        
+    def __init__(self, client_params: dict):
+        import whisper_online as wo
+
+        logger = logging.getLogger(__name__)
+        parser = argparse.ArgumentParser()
+
+        # options from whisper_online
+        wo.add_shared_args(parser)
+        args = parser.parse_args()
+
+        # Update args with client provided values
+        for key, value in client_params.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+
+        wo.set_logging(args, logger, other="")
+
         # Create whisper online processor object with args
-        self.asr, self.asr_proc = asr_factory(args)
+        self.asr, self.asr_proc = wo.asr_factory(args)
 
         # warm up the ASR so first chunk isn’t slow
-        msg = "Whisper is not warmed up. The first chunk processing may take longer."
-        if args.warmup_file:
-            if os.path.isfile(args.warmup_file):
-                a = load_audio_chunk(args.warmup_file,0,1)
-                self.asr.transcribe(a)
-                logger.info("Whisper is warmed up.", flush=True)
-            else:
-                logger.warning("The warm up file is not available. "+msg, flush=True)
+        warmup_file = "data/samples_jfk.wav"
+        if os.path.isfile(warmup_file):
+            a = wo.load_audio_chunk(warmup_file,0,1)
+            self.asr.transcribe(a)
+            logger.info("Whisper is warmed up.")
         else:
-            logger.warning(msg, flush=True)
+            logger.warning("The warm up file is not available. Whisper is not warmed up. The first chunk processing may take longer.")
 
     # Call before using the object for new audio stream
+    # Not used for now, as we create a new object for each client
     def clear(self):
         self.asr_proc.init()
 
 ######### Mic processor
 
 class ASRProcessor:
-    def __init__(self, args, audio_queue: mp.Queue, result_queue: mp.Queue):
-        self.args = args
+    def __init__(self, client_params: dict, audio_queue: mp.Queue, result_queue: mp.Queue):
+        self.client_params = client_params
         self.audio_queue = audio_queue
         self.result_queue = result_queue
 
@@ -53,7 +66,7 @@ class ASRProcessor:
         if not self.is_running:
             self.asr_subproc = mp.Process(
                 target=asr_subprocess_main,
-                args=(self.args, self.audio_queue, self.result_queue),
+                args=(self.client_params, self.audio_queue, self.result_queue),
                 daemon=False
             )
             self.asr_subproc.start()
@@ -286,34 +299,11 @@ class CaptionSender:
 
 class WhisperPipeline:
     def __init__(self, client_params, conn):
-        logger = logging.getLogger(__name__)
-        parser = argparse.ArgumentParser()
-
-        # options from whisper_online
-        add_shared_args(parser)
-
-        # additional options
-        parser.add_argument("--warmup-file", type=str, dest="warmup_file", default="data/samples_jfk.wav",
-                help="Path to wav file to warm up Whisper (optional).")
-        parser.add_argument("--audio-input-device", type=int, default=None,
-                help="Audio input device ID (default: system default)")
-        parser.add_argument("--zoom-url", type=str, default=None,
-                help="Zoom meeting URL to send captions to. If not set, captions are only printed to the console.")
-
-        self.args = parser.parse_args()
-
-        # Update args with client provided values
-        for key, value in client_params.items():
-            if hasattr(self.args, key):
-                setattr(self.args, key, value)
-
-        set_logging(self.args, logger, other="")
-
         self.audio_queue = mp.Queue()
         self.asr_queue = mp.Queue()
         self.transl_queue = queue.Queue()
 
-        zoom_url = self.args.zoom_url.strip() if self.args.zoom_url and self.args.zoom_url.strip() else None
+        zoom_url = client_params.get("zoom_url")
 
         print("Starting Translator thread...", flush=True)
         self.translator = Translator("Helsinki-NLP/opus-mt-tc-base-en-sh", "en", "sr", self.asr_queue, self.transl_queue, only_complete_sent=bool(zoom_url))
@@ -321,15 +311,15 @@ class WhisperPipeline:
 
         print("Starting Caption sender thread...", flush=True)
         if zoom_url:
-            # to warm up Zoom
-            self.transl_queue.put(("...", True))
+            zoom_url = zoom_url.strip()
+            self.transl_queue.put(("...", True))  # to warm up Zoom
             self.caption_sender = ZoomCaptionSender(self.transl_queue, zoom_url, "sr")
         else:
             self.caption_sender = CaptionSender(self.transl_queue, conn)
         self.caption_sender.start()
 
         print("Starting ASR thread...", flush=True)
-        self.asr_proc = ASRProcessor(self.args, self.audio_queue, self.asr_queue)
+        self.asr_proc = ASRProcessor(client_params, self.audio_queue, self.asr_queue)
         self.asr_proc.start()
 
     def process(self, arr):
@@ -384,6 +374,7 @@ class WhisperServer:
         finally:
             print("Server shutting down.")
             srv.close()
+            self.is_running = False
 
     def handle_client(self, conn: socket.socket):
         try:
@@ -433,18 +424,12 @@ class WhisperServer:
             print("Connection closed.")
 
 
-def asr_subprocess_main(args, audio_queue: mp.Queue, asr_queue: mp.Queue):
+def asr_subprocess_main(client_params: dict, audio_queue: mp.Queue, asr_queue: mp.Queue):
     """
     Runs in the subprocess: construct WhisperOnline here, then
     read audio chunks from audio_queue and put results to asr_queue.
     """
-
-    import sys
-
-    sys.stdout = sys.__stdout__
-    sys.stderr = sys.__stderr__
-
-    whisper_online = WhisperOnline(args)
+    whisper_online = WhisperOnline(client_params)
 
     # loop until sentinel
     while True:
@@ -480,6 +465,8 @@ if __name__ == "__main__":
     while True:
         try:
             threading.Event().wait(1)
+            if whisper_server.is_running is False:
+                break
         except KeyboardInterrupt:
             print("Stopping server...")
             break
