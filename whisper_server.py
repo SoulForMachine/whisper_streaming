@@ -343,12 +343,14 @@ class WhisperPipeline:
 
 
 class WhisperServer:
-    def __init__(self, host="0.0.0.0", port=5000):
+    def __init__(self, host="0.0.0.0", port=5000, write_wav=False, write_transcript=False):
         self.conn = None
         self.server_thread = None
         self.is_running = False
         self.host = host
         self.port = port
+        self.write_wav = write_wav
+        self.write_transcript = write_transcript
 
     def start(self):
         if not self.is_running:
@@ -388,6 +390,10 @@ class WhisperServer:
 
             pipeline = WhisperPipeline(params, conn)
 
+            if self.write_wav:
+                import wav_writer
+                wav_out = wav_writer.WavWriter("debug_received.wav")
+
             # Step 2: confirm initialization
             ccmn.send_json(conn, {"type": "status", "value": "ready"})
 
@@ -417,11 +423,17 @@ class WhisperServer:
                 # Send received chunk to the pipeline
                 pipeline.process(chunk)
 
+                if self.write_wav:
+                    wav_out.write_chunk(chunk)
+
         except (ConnectionResetError, OSError) as e:
             print(f"Connection lost: {e}.")
         finally:
             conn.close()
             print("Connection closed.")
+
+            if self.write_wav:
+                wav_out.close()
 
 
 def asr_subprocess_main(client_params: dict, audio_queue: mp.Queue, asr_queue: mp.Queue):
@@ -457,9 +469,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host adress. Default: 0.0.0.0")
     parser.add_argument("--port", type=int, default=5000, help="Port number. Default: 5000")
+    parser.add_argument("--write-wav", action="store_true", help="Write received audio to a wav file.")
+    parser.add_argument("--write-transcript", action="store_true", help="Write received transcript to a text file.")
     args = parser.parse_args(sys.argv[1:])
 
-    whisper_server = WhisperServer(args.host, args.port)
+    whisper_server = WhisperServer(args.host, args.port, args.write_wav, args.write_transcript)
     whisper_server.start()
 
     while True:
