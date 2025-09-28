@@ -39,7 +39,7 @@ jobs:
 
       - name: Remove quarantine attribute
         run: |
-          xattr -cr dist/MyApp-${VERSION}.app
+          xattr -cr dist/Captioner-${VERSION}.app
 
       - name: Zip outputs
         run: |
