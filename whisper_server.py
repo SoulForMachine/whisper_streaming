@@ -3,6 +3,7 @@ import captioner_common as ccmn
 from whisper_online import *
 from transformers import MarianTokenizer, MarianMTModel
 from urllib.parse import urlparse, parse_qs
+import multiprocessing as mp
 
 import argparse
 import os
@@ -14,51 +15,57 @@ import json
 import re
 
 
-######### Mic processor
+######### WhisperOnline
 
-class ASRProcessor:
-    def __init__(self, args, audio_queue: queue.Queue, result_queue: queue.Queue):
-        self.audio_queue = audio_queue
-        self.result_queue = result_queue
-
+class WhisperOnline:
+    def __init__(self, args):        
         # Create whisper online processor object with args
-        asr, self.online_asr_proc = asr_factory(args)
+        self.asr, self.asr_proc = asr_factory(args)
 
         # warm up the ASR so first chunk isn’t slow
         msg = "Whisper is not warmed up. The first chunk processing may take longer."
         if args.warmup_file:
             if os.path.isfile(args.warmup_file):
                 a = load_audio_chunk(args.warmup_file,0,1)
-                asr.transcribe(a)
-                logger.info("Whisper is warmed up.")
+                self.asr.transcribe(a)
+                logger.info("Whisper is warmed up.", flush=True)
             else:
-                logger.critical("The warm up file is not available. "+msg)
+                logger.warning("The warm up file is not available. "+msg, flush=True)
         else:
-            logger.warning(msg)
+            logger.warning(msg, flush=True)
 
-    def run(self):
-        self.online_asr_proc.init()
+    # Call before using the object for new audio stream
+    def clear(self):
+        self.asr_proc.init()
 
-        while True:
-            chunk = self.audio_queue.get()
-            if chunk is None:
-                print("--- quitting ASR thread.")
-                break
+######### Mic processor
 
-            self.online_asr_proc.insert_audio_chunk(chunk)
-            result = self.online_asr_proc.process_iter()
-            if result and result[2]:
-                self.result_queue.put(result[2])
-                print(f"[ASR] {result[2]}", flush=True)
+class ASRProcessor:
+    def __init__(self, args, audio_queue: mp.Queue, result_queue: mp.Queue):
+        self.args = args
+        self.audio_queue = audio_queue
+        self.result_queue = result_queue
+
+        self.asr_subproc = None
+        self.is_running = False
+
+    def start(self):
+        if not self.is_running:
+            self.asr_subproc = mp.Process(
+                target=asr_subprocess_main,
+                args=(self.args, self.audio_queue, self.result_queue),
+                daemon=False
+            )
+            self.asr_subproc.start()
+            self.is_running = True
 
     def stop(self):
-        self.audio_queue.put(None)
+        if self.is_running:
+            self.audio_queue.put(None)
+            self.asr_subproc.join()
+            self.asr_subproc = None
+            self.is_running = False
 
-    def finish(self):
-        result = self.online_asr_proc.finish()
-        if result and result[2]:
-            self.result_queue.put(result[2])
-            print(f"[ASR] {result[2]}", flush=True)
 
 ########## Translator
 
@@ -72,6 +79,9 @@ class Translator:
         self.result_queue = result_queue
         self.only_complete_sent = only_complete_sent
         self.current_text = ""
+
+        self.transl_thread = None
+        self.is_running = False
 
     FLUSH_TIMEOUT = 6  # seconds
 
@@ -104,6 +114,19 @@ class Translator:
         translated = self.translator.generate(**inputs)
         transl_text = self.tokenizer.decode(translated[0], skip_special_tokens=True)
         self.result_queue.put((transl_text, text[1]))
+
+    def start(self):
+        if not self.is_running:
+            self.transl_thread = threading.Thread(target=self.run)
+            self.transl_thread.start()
+            self.is_running = True
+
+    def stop(self):
+        if self.is_running:
+            self.source_queue.put(None)
+            self.transl_thread.join()
+            self.transl_thread = None
+            self.is_running = False
 
     def run(self):
         last_partial_len = 0
@@ -139,7 +162,6 @@ class Translator:
                         last_partial_len = len(text)
                         self.translate_text(to_translate)
 
-
 ########## Zoom caption sender
 
 class ZoomCaptionSender:
@@ -147,6 +169,8 @@ class ZoomCaptionSender:
         self.source_queue = source_queue
         self.zoom_url = zoom_url
         self.zoom_language = zoom_language
+        self.caption_thread = None
+        self.is_running = False
 
         self.meeting_id = self._extract_meeting_id(zoom_url) if zoom_url else None
         if self.meeting_id:
@@ -155,6 +179,19 @@ class ZoomCaptionSender:
         else:
             self.seq_map = {}
             self.sequence = 0
+
+    def start(self):
+        if not self.is_running:
+            self.caption_thread = threading.Thread(target=self.run)
+            self.caption_thread.start()
+            self.is_running = True
+
+    def stop(self):
+        if self.is_running:
+            self.source_queue.put((None, None))
+            self.caption_thread.join()
+            self.caption_thread = None
+            self.is_running = False
 
     def run(self):
         while True:
@@ -213,6 +250,21 @@ class CaptionSender:
     def __init__(self, source_queue, conn):
         self.source_queue = source_queue
         self.conn = conn
+        self.caption_thread = None
+        self.is_running = False
+
+    def start(self):
+        if not self.is_running:
+            self.caption_thread = threading.Thread(target=self.run)
+            self.caption_thread.start()
+            self.is_running = True
+
+    def stop(self):
+        if self.is_running:
+            self.source_queue.put((None, None))
+            self.caption_thread.join()
+            self.caption_thread = None
+            self.is_running = False
 
     def run(self):
         while True:
@@ -241,7 +293,7 @@ class WhisperPipeline:
         add_shared_args(parser)
 
         # additional options
-        parser.add_argument("--warmup-file", type=str, dest="warmup_file",
+        parser.add_argument("--warmup-file", type=str, dest="warmup_file", default="data/samples_jfk.wav",
                 help="Path to wav file to warm up Whisper (optional).")
         parser.add_argument("--audio-input-device", type=int, default=None,
                 help="Audio input device ID (default: system default)")
@@ -257,136 +309,163 @@ class WhisperPipeline:
 
         set_logging(self.args, logger, other="")
 
-        self.audio_queue = queue.Queue()
-        self.asr_queue = queue.Queue()
+        self.audio_queue = mp.Queue()
+        self.asr_queue = mp.Queue()
         self.transl_queue = queue.Queue()
 
         zoom_url = self.args.zoom_url.strip() if self.args.zoom_url and self.args.zoom_url.strip() else None
 
         print("Starting Translator thread...", flush=True)
         self.translator = Translator("Helsinki-NLP/opus-mt-tc-base-en-sh", "en", "sr", self.asr_queue, self.transl_queue, only_complete_sent=bool(zoom_url))
-        self.transl_thread = threading.Thread(target=self.translator.run, daemon=True)
-        self.transl_thread.start()
+        self.translator.start()
 
         print("Starting Caption sender thread...", flush=True)
         if zoom_url:
             # to warm up Zoom
             self.transl_queue.put(("...", True))
-
             self.caption_sender = ZoomCaptionSender(self.transl_queue, zoom_url, "sr")
-            self.caption_thread = threading.Thread(target=self.caption_sender.run, daemon=True)
-            self.caption_thread.start()
         else:
             self.caption_sender = CaptionSender(self.transl_queue, conn)
-            self.caption_thread = threading.Thread(target=self.caption_sender.run, daemon=True)
-            self.caption_thread.start()
+        self.caption_sender.start()
 
         print("Starting ASR thread...", flush=True)
         self.asr_proc = ASRProcessor(self.args, self.audio_queue, self.asr_queue)
-        self.asr_thread = threading.Thread(target=self.asr_proc.run, daemon=True)
-        self.asr_thread.start()
+        self.asr_proc.start()
 
     def process(self, arr):
         self.audio_queue.put(arr)
 
     def stop(self):
-        # this will flush any remaining text
-        self.asr_proc.finish()
-
         print("Stopping all threads...", flush=True)
 
-        # signal ASR thread to stop
-        self.asr_proc.stop()
         print("ASR thread exiting...", flush=True)
-        self.asr_thread.join()
+        self.asr_proc.stop()
 
-        self.asr_queue.put(None)
         print("Translator thread exiting...", flush=True)
-        self.transl_thread.join()
+        self.translator.stop()
 
-        self.transl_queue.put((None, None))
         print("Caption sender thread exiting...", flush=True)
-        self.caption_thread.join()
-        print("--- all threads stopped.", flush=True)
+        self.caption_sender.stop()
+
+        self.asr_proc = None
+        self.translator = None
+        self.caption_sender = None
+
+
+class WhisperServer:
+    def __init__(self, host="0.0.0.0", port=5000):
+        self.conn = None
+        self.server_thread = None
+        self.is_running = False
+        self.host = host
+        self.port = port
+
+    def start(self):
+        if not self.is_running:
+            self.server_thread = threading.Thread(target=self.run, daemon=True)
+            self.server_thread.start()
+            self.is_running = True
+
+    def run(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind((self.host, self.port))
+        srv.listen(1)
 
         try:
-            self.asr_proc = None
-            self.translator = None
-            self.caption_sender = None
+            while True:
+                print(f"Server listening on {self.host}:{self.port}")
+                conn, addr = srv.accept()
+                print(f"Connected by {addr}")
+                self.handle_client(conn)
+        except KeyboardInterrupt:
+            print("Interrupted by user, stopping...")
         except Exception as e:
-            print(f"--- Error releasing objects: {e}", flush=True)
-        print("--- all objects released.", flush=True)
+            print(f"Server error: {e}")
+        finally:
+            print("Server shutting down.")
+            srv.close()
 
+    def handle_client(self, conn: socket.socket):
+        try:
+            # Step 1: receive params
+            params = ccmn.recv_json(conn)
+            if params is None:
+                print("Failed to receive params.")
+                conn.close()
+                return
+            print("Received params:", params)
 
-def whisper_server(host="0.0.0.0", port=5000):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.bind((host, port))
-    srv.listen(1)
+            pipeline = WhisperPipeline(params, conn)
 
-    try:
-        while True:
-            print(f"Server listening on {host}:{port}")
-            conn, addr = srv.accept()
-            print(f"Connected by {addr}")
-            handle_client(conn)
-    except KeyboardInterrupt:
-        print("Interrupted by user, stopping...")
-    except Exception as e:
-        print(f"Server error: {e}")
-    finally:
-        print("Server shutting down.")
-        srv.close()
+            # Step 2: confirm initialization
+            ccmn.send_json(conn, {"type": "status", "value": "ready"})
 
+            # Step 3: receive audio chunks
+            while True:
+                chunk = ccmn.recv_ndarray(conn)
+                if chunk is None:
+                    print("Client disconnected unexpectedly.")
+                    break
 
-def handle_client(conn):
-    try:
-        # Step 1: receive params
-        params = ccmn.recv_json(conn)
-        if params is None:
-            print("Failed to receive params.")
+                # Empty array signals that the client is diconnecting.
+                if len(chunk) == 0:
+                    print("Client gracefully disconnecting.")
+
+                    # Stop the pipeline. This will flush any remaining text.
+                    pipeline.stop()
+
+                    # Confirm shutdown
+                    ccmn.send_json(conn, {
+                        "type": "status",
+                        "value": "shutdown"
+                    })
+
+                    conn.shutdown(socket.SHUT_WR)
+                    break
+
+                # Send received chunk to the pipeline
+                pipeline.process(chunk)
+
+        except (ConnectionResetError, OSError) as e:
+            print(f"Connection lost: {e}.")
+        finally:
             conn.close()
-            return
-        print("Received params:", params)
+            print("Connection closed.")
 
-        pipeline = WhisperPipeline(params, conn)
 
-        # Step 2: confirm initialization
-        ccmn.send_json(conn, {"type": "status", "value": "ready"})
+def asr_subprocess_main(args, audio_queue: mp.Queue, asr_queue: mp.Queue):
+    """
+    Runs in the subprocess: construct WhisperOnline here, then
+    read audio chunks from audio_queue and put results to asr_queue.
+    """
 
-        # Step 3: receive audio chunks
-        while True:
-            arr = ccmn.recv_ndarray(conn)
-            if arr is None:
-                print("Client disconnected unexpectedly.")
-                break
+    import sys
 
-            # Empty array signals shutdown
-            if len(arr) == 0:
-                print("Client disconnecting.")
-                ccmn.send_json(conn, {
-                    "type": "status",
-                    "value": "shutdown"
-                })
-                break
+    sys.stdout = sys.__stdout__
+    sys.stderr = sys.__stderr__
 
-            # Send it to the pipeline
-            pipeline.process(arr)
+    whisper_online = WhisperOnline(args)
 
-    except (ConnectionResetError, OSError) as e:
-        print(f"Connection lost: {e}.")
-    finally:
-        print("--- stopping pipeline and closing connection.")
-        try:
-            pipeline.stop()
-        except Exception as e:
-            print(f"--- Error closing connection: {e}")
-        print("--- pipeline stopped.")
-        conn.close()
-        
-        print("--- connection closed.")
+    # loop until sentinel
+    while True:
+        chunk = audio_queue.get()
+        if chunk is None:
+            break
+
+        whisper_online.asr_proc.insert_audio_chunk(chunk)
+        result = whisper_online.asr_proc.process_iter()
+        if result and result[2]:
+            asr_queue.put(result[2])
+            print(f"[ASR] {result[2]}", flush=True)
+
+    # flush any remaining audio
+    result = whisper_online.asr_proc.finish()
+    if result and result[2]:
+        asr_queue.put(result[2])
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     import sys
 
     parser = argparse.ArgumentParser()
@@ -395,4 +474,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=5000, help="Port number. Default: 5000")
     args = parser.parse_args(sys.argv[1:])
 
-    whisper_server(args.host, args.port)
+    whisper_server = WhisperServer(args.host, args.port)
+    whisper_server.start()
+
+    while True:
+        try:
+            threading.Event().wait(1)
+        except KeyboardInterrupt:
+            print("Stopping server...")
+            break
