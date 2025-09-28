@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-macos:
-    runs-on: macos-12   # target Monterey for wider compatibility
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
