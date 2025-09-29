@@ -81,9 +81,13 @@ class CaptionerUI:
     def __init__(self):
         self.setup_ui()
         self.is_running = False
-        self.audio_thread = None
         self.audio_listener = None
+        self.audio_listener_2 = None
+        self.audio_mixer = None
+        self.audio_temp_queue_1 = None
+        self.audio_temp_queue_2 = None
         self.audio_queue = None
+        self.resuts_queue = None
         self.whisper_client = None
         self.whisper_client_thread = None
         self.captions_overlay = None
@@ -126,26 +130,48 @@ class CaptionerUI:
         self.clear_btn = ttk.Button(root, text="Clear", command=lambda: self.zoom_url_var.set(""))
         self.clear_btn.grid(row=row_idx, column=3, sticky="ew", padx=5, pady=5)
 
-        # --- Audio device ---
-        row_idx = self.next_row()
+        # --- Audio device 1 ---
         self.device_map = list_unique_input_devices()
         device_list = list(self.device_map.keys())
         default_device_index = default_input_device_index()
 
-        tk.Label(root, text="Audio device").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.audio_device_combo = ttk.Combobox(root, values=device_list, state="readonly")
-        self.audio_device_combo.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        row_idx = self.next_row()
+        tk.Label(root, text="Audio device 1").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.audio_device_combo_1 = ttk.Combobox(root, values=device_list, state="readonly")
+        self.audio_device_combo_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
         tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.input_dev_info_label = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
-        self.input_dev_info_label.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.input_dev_info_label_1 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
+        self.input_dev_info_label_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # Now set the combo selection changed callback and select the default audio device.
-        self.audio_device_combo.current(default_device_index if default_device_index < len(device_list) else 0)
-        self.audio_device_combo.bind("<<ComboboxSelected>>", self.on_audio_device_selection_change)
-        self.audio_device_combo.event_generate("<<ComboboxSelected>>")
+        self.audio_device_combo_1.current(default_device_index if default_device_index < len(device_list) else 0)
+        self.audio_device_combo_1.bind("<<ComboboxSelected>>", self.on_audio_device_1_selection_change)
+        self.audio_device_combo_1.event_generate("<<ComboboxSelected>>")
+
+        # --- Audio device 2 ---
+        row_idx = self.next_row()
+        tk.Label(root, text="Audio device 2").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.audio_device_combo_2 = ttk.Combobox(root, values=device_list, state="disabled")
+        self.audio_device_combo_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # Checkbox for enabling the second device
+        row_idx = self.next_row()
+        self.use_second_audio_dev_var = tk.BooleanVar(value=False)
+        self.use_second_audio_dev_check = ttk.Checkbutton(root, text="Use this device", variable=self.use_second_audio_dev_var, command=self.on_enable_second_audio_device)
+        self.use_second_audio_dev_check.grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+
+        # Use a Label widget for multiline read-only display
+        tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.input_dev_info_label_2 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
+        self.input_dev_info_label_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # Now set the combo selection changed callback and select the default audio device.
+        self.audio_device_combo_2.current(default_device_index if default_device_index < len(device_list) else 0)
+        self.audio_device_combo_2.bind("<<ComboboxSelected>>", self.on_audio_device_2_selection_change)
+        self.audio_device_combo_2.event_generate("<<ComboboxSelected>>")
 
         # --- Whisper model ---
         row_idx = self.next_row()
@@ -224,6 +250,30 @@ class CaptionerUI:
         # make second column expand
         root.columnconfigure(1, weight=1)
 
+    def show_modal_message(self, title, message, parent):
+        # Create a modal Toplevel window
+        win = tk.Toplevel(parent)
+        win.title(title)
+        win.transient(parent)   # Keep on top of parent
+        win.grab_set()          # Make modal
+        win.resizable(False, False)  # Disable resizing
+
+        # Message text
+        label = tk.Label(win, text=message, padx=20, pady=20)
+        label.pack()
+
+        # OK button
+        btn = tk.Button(win, text="OK", command=win.destroy, width=10)
+        btn.pack(pady=10)
+
+        # Center relative to parent
+        win.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (win.winfo_width() // 2)
+        y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (win.winfo_height() // 2)
+        win.geometry(f"+{x}+{y}")
+
+        parent.wait_window(win)  # Wait until this window is closed
+
     def start(self):
         if self.is_running:
             self.stop_captioner()
@@ -231,9 +281,15 @@ class CaptionerUI:
             self.is_running = False
             print("Captioner stopped.")
         else:
+            if self.use_second_audio_dev_var.get() and (self.audio_device_combo_1.get() == self.audio_device_combo_2.get()):
+                self.show_modal_message("Error", "Please select two different audio devices.", self.root_wnd)
+                return
+
             # Collect all values for debugging/demo purposes
             print("Zoom URL:", self.zoom_url_var.get())
-            print("Audio device:", self.audio_device_combo.get())
+            print("Audio device:", self.audio_device_combo_1.get())
+            if self.use_second_audio_dev_var.get():
+                print("Audio device 2:", self.audio_device_combo_2.get())
             print("Whisper model:", self.model_var.get())
             print("Whisper device:", self.whisper_device_var.get())
             print("Whisper compute type:", self.whisper_compute_type_var.get())
@@ -262,14 +318,29 @@ class CaptionerUI:
         else:
             self.target_lang_combo.config(state="disabled")
 
-    def on_audio_device_selection_change(self, event):
-        sel_dev_info = self.get_selected_device_info()
+    def on_enable_second_audio_device(self):
+        if self.use_second_audio_dev_var.get():
+            self.audio_device_combo_2.config(state="readonly")
+        else:
+            self.audio_device_combo_2.config(state="disabled")
+
+    def on_audio_device_1_selection_change(self, event):
+        sel_dev_info = self.get_selected_device_info(1)
         info_text = (
             f"API: {sel_dev_info.api}\n"
             f"Channels: {sel_dev_info.max_input_channels}\n"
             f"Samplerate: {int(sel_dev_info.default_samplerate)}"
         )
-        self.input_dev_info_label.config(text=info_text)
+        self.input_dev_info_label_1.config(text=info_text)
+
+    def on_audio_device_2_selection_change(self, event):
+        sel_dev_info = self.get_selected_device_info(2)
+        info_text = (
+            f"API: {sel_dev_info.api}\n"
+            f"Channels: {sel_dev_info.max_input_channels}\n"
+            f"Samplerate: {int(sel_dev_info.default_samplerate)}"
+        )
+        self.input_dev_info_label_2.config(text=info_text)
 
     # Helper to manage grid row indices
     def next_row(self):
@@ -277,8 +348,8 @@ class CaptionerUI:
         self.row_i += 1
         return r
 
-    def get_selected_device_index(self):
-        sel_name = self.audio_device_combo.get()
+    def get_selected_device_index(self, dev_num: int) -> int:
+        sel_name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
         # Find the index in input_devices
         dev_index = None
         for i, name in enumerate(self.device_map.keys()):
@@ -287,8 +358,8 @@ class CaptionerUI:
                 break
         return dev_index
 
-    def get_selected_device_info(self) -> InputDeviceInfo:
-        sel_name = self.audio_device_combo.get()
+    def get_selected_device_info(self, dev_num: int) -> InputDeviceInfo:
+        sel_name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
         # Find the index in input_devices
         for name, dev_info in self.device_map.items():
             if name == sel_name:
@@ -344,24 +415,39 @@ class CaptionerUI:
         self.captions_overlay.start()
 
     def run_audio_listener(self):
-        dev_info = self.get_selected_device_info()
-
         min_chunk_size, valid = str_to_float(self.min_chunk_size_var.get())
         if not valid:
             print("Error: Invalid minimum chunk size. Setting to default: 0.6")
             min_chunk_size = 0.6
 
-        self.audio_listener = AudioListener(min_chunk_size, dev_info, self.audio_queue)
-        self.audio_thread = threading.Thread(target=self.audio_listener.run)
-        self.audio_thread.start()
+        dev_info_1 = self.get_selected_device_info(1)
+        use_second_dev = self.use_second_audio_dev_var.get()
+        if use_second_dev:
+            self.audio_temp_queue_1 = queue.Queue()
+            self.audio_listener = AudioListener(min_chunk_size, dev_info_1, self.audio_temp_queue_1)
+
+            dev_info_2 = self.get_selected_device_info(2)
+            self.audio_temp_queue_2 = queue.Queue()
+            self.audio_listener_2 = AudioListener(min_chunk_size, dev_info_2, self.audio_temp_queue_2)
+            self.audio_mixer = AudioMixer(self.audio_temp_queue_1, self.audio_temp_queue_2, self.audio_queue)
+        else:
+            # We use one device, puts the results directly to the audio_queue.
+            self.audio_listener = AudioListener(min_chunk_size, dev_info_1, self.audio_queue)
 
     def stop_captioner(self):
-        if self.audio_thread:
+        if self.audio_listener:
             print("Stopping audio listener...", flush=True)
             self.audio_listener.stop()
-            self.audio_thread.join()
-            self.audio_thread = None
             self.audio_listener = None
+
+        if self.audio_listener_2:
+            print("Stopping audio listener 2...", flush=True)
+            self.audio_listener_2.stop()
+            self.audio_listener_2 = None
+
+            print("Stopping audio mixer thread...", flush=True)
+            self.audio_mixer.stop()
+            self.audio_mixer = None
 
         if self.whisper_client:
             print("Stopping whisper client...", flush=True)
@@ -377,6 +463,8 @@ class CaptionerUI:
 
         self.audio_queue = None
         self.resuts_queue = None
+        self.audio_temp_queue_1 = None
+        self.audio_temp_queue_2 = None
 
     def run_gui(self):
         self.root_wnd.mainloop()
@@ -388,15 +476,18 @@ class AudioListener:
         self.input_device_info = input_device_info
         self.is_first = True
 
-        self.audio_queue = queue.Queue()
-        self.result_queue = result_queue
-        self.stop_event = threading.Event()
-
         self.WHISPER_SAMPLERATE = 16000
         self.in_stream_latency = 0.5
 
         self.device_rate = int(input_device_info.default_samplerate)
         self.device_channels = input_device_info.max_input_channels
+
+        self.audio_queue = queue.Queue()
+        self.result_queue = result_queue
+
+        self.stop_event = threading.Event()
+        self.audio_thread = threading.Thread(target=self.run)
+        self.audio_thread.start()
 
     def _audio_callback_old(self, indata, frames, time_info, status):
         if status:
@@ -475,6 +566,129 @@ class AudioListener:
 
     def stop(self):
         self.stop_event.set()
+        self.audio_thread.join()
+        self.audio_thread = None
+
+
+class AudioMixer:
+    """
+    Mixes two audio sources (mic + VB-CABLE) from their queues into a single
+    16 kHz mono stream for Whisper.
+    """
+    def __init__(self, mic_queue: queue.Queue, cable_queue: queue.Queue, result_queue: queue.Queue):
+        self.mic_queue = mic_queue
+        self.cable_queue = cable_queue
+        self.result_queue = result_queue
+        self.stop_event = threading.Event()
+
+        self.mixing_thread = threading.Thread(target=self.run)
+        self.mixing_thread.start()
+
+        # Minimum chunk size in samples (same as your AudioListener min_chunk_size)
+        #self.min_chunk_size = 8000  # e.g., 0.5 s at 16 kHz
+
+    def stop(self):
+        self.stop_event.set()
+        self.mic_queue.put(None)
+        self.cable_queue.put(None)
+        self.mixing_thread.join()
+        self.mixing_thread = None
+
+    def receive_chunk_from_queue(self, q: queue.Queue):
+        """
+        Pull one chunk from a queue, or return None if empty.
+        """
+        try:
+            return q.get(timeout=0.1)
+        except queue.Empty:
+            return None
+
+    def run(self):
+        while not self.stop_event.is_set():
+            mic_chunk = self.receive_chunk_from_queue(self.mic_queue)
+            cable_chunk = self.receive_chunk_from_queue(self.cable_queue)
+
+            # Skip if both are empty
+            if mic_chunk is None and cable_chunk is None:
+                continue
+
+            # Replace None with zeros for mixing
+            if mic_chunk is None:
+                mic_chunk = np.zeros_like(cable_chunk)
+            if cable_chunk is None:
+                cable_chunk = np.zeros_like(mic_chunk)
+
+            # Align lengths
+            min_len = min(len(mic_chunk), len(cable_chunk))
+            mixed = mic_chunk[:min_len] + cable_chunk[:min_len]
+
+            # Optional: prevent clipping
+            mixed = np.clip(mixed, -1.0, 1.0)
+
+            self.result_queue.put(mixed)
+
+
+class AudioMixer2:
+    """
+    Mixes two audio sources (mic + VB-CABLE) into a single
+    16 kHz mono stream, outputting uniform chunks.
+    """
+    def __init__(self, mic_queue: queue.Queue, cable_queue: queue.Queue, result_queue: queue.Queue, min_chunk_size: int):
+        self.mic_queue = mic_queue
+        self.cable_queue = cable_queue
+        self.result_queue = result_queue
+        self.stop_event = threading.Event()
+
+        # Minimum chunk size in samples (e.g., 8000 = 0.5s @ 16kHz)
+        self.min_chunk_size = min_chunk_size
+
+        # Buffers to hold leftover samples until enough are collected
+        self.buffer = np.zeros(0, dtype=np.float32)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def receive_chunk_from_queue(self, q: queue.Queue):
+        """Pull one chunk from a queue, or return None if empty."""
+        try:
+            return q.get(timeout=0.05)
+        except queue.Empty:
+            return None
+
+    def run(self):
+        while not self.stop_event.is_set():
+            mic_chunk = self.receive_chunk_from_queue(self.mic_queue)
+            cable_chunk = self.receive_chunk_from_queue(self.cable_queue)
+
+            # If nothing arrived, loop again
+            if mic_chunk is None and cable_chunk is None:
+                continue
+
+            # Replace missing chunks with zeros
+            if mic_chunk is None and cable_chunk is not None:
+                mic_chunk = np.zeros_like(cable_chunk)
+            elif cable_chunk is None and mic_chunk is not None:
+                cable_chunk = np.zeros_like(mic_chunk)
+
+            # If still both None, skip
+            if mic_chunk is None or cable_chunk is None:
+                continue
+
+            # Align lengths
+            min_len = min(len(mic_chunk), len(cable_chunk))
+            mixed = mic_chunk[:min_len] + cable_chunk[:min_len]
+
+            # Prevent clipping
+            mixed = np.clip(mixed, -1.0, 1.0).astype(np.float32)
+
+            # Append to buffer
+            self.buffer = np.concatenate([self.buffer, mixed])
+
+            # While enough samples, push out uniform chunks
+            while len(self.buffer) >= self.min_chunk_size:
+                out_chunk = self.buffer[:self.min_chunk_size]
+                self.buffer = self.buffer[self.min_chunk_size:]
+                self.result_queue.put(out_chunk)
 
 
 class WhisperClient:
