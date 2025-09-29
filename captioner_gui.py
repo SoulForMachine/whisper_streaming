@@ -5,63 +5,79 @@ import threading
 import numpy as np
 import sounddevice as sd
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk
 import logging
 import captioner_common as ccmn
 from scipy.signal import resample_poly
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+class InputDeviceCaps:
+    def __init__(self, channels: int, samplerate: float, min_latency: float, max_latency: float, index: int):
+        self.channels = channels
+        self.samplerate = samplerate
+        self.min_latency = min_latency
+        self.max_latency = max_latency
+        self.index = index
+
+    def __repr__(self):
+        return f"InputDeviceCaps(channels={self.channels}, samplerate={self.samplerate}, index={self.index})"
+
 class InputDeviceInfo:
-    def __init__(self, name, api, max_input_channels, default_samplerate):
+    def __init__(self, name: str, api: str, caps: InputDeviceCaps):
         self.name = name
         self.api = api
-        self.max_input_channels = max_input_channels
-        self.default_samplerate = default_samplerate
-        self.index = 0
+        self.max_input_channels = caps.channels
+        self.default_samplerate = caps.samplerate
+        self.min_latency = caps.min_latency
+        self.max_latency = caps.max_latency
+        self.index = caps.index
 
-def list_unique_input_devices(preferred_apis=None):
-    """
-    Return a dict of unique input devices, picking the best API
-    if duplicates exist.
-    """
-    if preferred_apis is None:
-        if sys.platform.startswith("win"):
-            preferred_apis = ["Windows WASAPI", "Windows DirectSound", "MME"]
-        elif sys.platform == "darwin":
-            preferred_apis = ["Core Audio"]
-        else:  # Linux
-            preferred_apis = ["ALSA", "PulseAudio", "JACK"]
+def sort_by_preference(api_list):
+    if sys.platform.startswith("win"):
+        preferred_apis = ["MME", "Windows DirectSound", "Windows WDM-KS", "Windows WASAPI"]
+    elif sys.platform == "darwin":
+        preferred_apis = ["Core Audio"]
+    else:  # Linux
+        preferred_apis = ["ALSA", "PulseAudio", "JACK"]
 
-    devices = sd.query_devices()
-    apis = sd.query_hostapis()
+    order = {item: i for i, item in enumerate(preferred_apis)}
 
-    unique_devs = {}
-    for i, dev in enumerate(devices):
-        if dev['max_input_channels'] > 0:
-            api_name = apis[dev['hostapi']]['name']
-            key = dev['name']
-            entry = InputDeviceInfo(dev['name'], api_name, dev['max_input_channels'], dev['default_samplerate'])
+    # Use a tuple as key: (index if in preferred_apis, else very large number to push to end)
+    return sorted(api_list, key=lambda x: order.get(x, float('inf')))
 
-            if key not in unique_devs:
-                unique_devs[key] = entry
-            else:
-                # Prefer device with "better" API
-                existing = unique_devs[key]
-                try:
-                    if preferred_apis.index(api_name) < preferred_apis.index(existing.api):
-                        unique_devs[key] = entry
-                except ValueError:
-                    # if API not in preferred list, keep existing
-                    pass
 
-    for i, dev in enumerate(unique_devs.values()):
-        dev.index = i
+def list_unique_input_devices():
+    # Outer dict: device_name -> hostapi_name -> InputDeviceCaps
+    devices_dict = defaultdict(dict)
 
-    return unique_devs
+    all_devices = sd.query_devices()
+    hostapis = sd.query_hostapis()
 
-def default_input_device_index():
-    return sd.default.device[0]
+    for i, dev in enumerate(all_devices):
+        if dev['max_input_channels'] == 0:
+            continue  # skip output devices
+
+        hostapi_name = hostapis[dev['hostapi']]['name']
+
+        devices_dict[dev['name']][hostapi_name] = InputDeviceCaps(
+            channels=dev['max_input_channels'],
+            samplerate=dev['default_samplerate'],
+            min_latency=dev['default_low_input_latency'],
+            max_latency=dev['default_high_input_latency'],
+            index=dev['index']
+        )
+    return devices_dict
+
+
+def default_input_device(device_map):
+    def_dev_index = sd.default.device[0]
+    for name, api_map in device_map.items():
+        for api, caps in api_map.items():
+            if caps.index == def_dev_index:
+                return (name, api)
+    return None
 
 def str_to_float(s):
     try:
@@ -133,12 +149,18 @@ class CaptionerUI:
         # --- Audio device 1 ---
         self.device_map = list_unique_input_devices()
         device_list = list(self.device_map.keys())
-        default_device_index = default_input_device_index()
+        dev_name, api_name = default_input_device(self.device_map)
 
         row_idx = self.next_row()
         tk.Label(root, text="Audio device 1").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.audio_device_combo_1 = ttk.Combobox(root, values=device_list, state="readonly")
         self.audio_device_combo_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        row_idx = self.next_row()
+        tk.Label(root, text="Host API").grid(row=row_idx, column=0, sticky="e", padx=5, pady=5)
+        self.audio_device_host_api_combo_1 = ttk.Combobox(root, values=[], state="readonly")
+        self.audio_device_host_api_combo_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.audio_device_host_api_combo_1.bind("<<ComboboxSelected>>", self.on_audio_device_host_api_1_selection_change)
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
@@ -147,7 +169,7 @@ class CaptionerUI:
         self.input_dev_info_label_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # Now set the combo selection changed callback and select the default audio device.
-        self.audio_device_combo_1.current(default_device_index if default_device_index < len(device_list) else 0)
+        self.audio_device_combo_1.set(dev_name)
         self.audio_device_combo_1.bind("<<ComboboxSelected>>", self.on_audio_device_1_selection_change)
         self.audio_device_combo_1.event_generate("<<ComboboxSelected>>")
 
@@ -158,18 +180,24 @@ class CaptionerUI:
         self.audio_device_combo_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # Checkbox for enabling the second device
-        row_idx = self.next_row()
         self.use_second_audio_dev_var = tk.BooleanVar(value=False)
         self.use_second_audio_dev_check = ttk.Checkbutton(root, text="Use this device", variable=self.use_second_audio_dev_var, command=self.on_enable_second_audio_device)
-        self.use_second_audio_dev_check.grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
+        self.use_second_audio_dev_check.grid(row=row_idx, column=3, sticky="w", padx=5, pady=5)
+
+        row_idx = self.next_row()
+        tk.Label(root, text="Host API").grid(row=row_idx, column=0, sticky="e", padx=5, pady=5)
+        self.audio_device_host_api_combo_2 = ttk.Combobox(root, values=[], state="disabled")
+        self.audio_device_host_api_combo_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.audio_device_host_api_combo_2.bind("<<ComboboxSelected>>", self.on_audio_device_host_api_2_selection_change)
 
         # Use a Label widget for multiline read-only display
+        row_idx = self.next_row()
         tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
         self.input_dev_info_label_2 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # Now set the combo selection changed callback and select the default audio device.
-        self.audio_device_combo_2.current(default_device_index if default_device_index < len(device_list) else 0)
+        self.audio_device_combo_2.set(dev_name)
         self.audio_device_combo_2.bind("<<ComboboxSelected>>", self.on_audio_device_2_selection_change)
         self.audio_device_combo_2.event_generate("<<ComboboxSelected>>")
 
@@ -321,24 +349,46 @@ class CaptionerUI:
     def on_enable_second_audio_device(self):
         if self.use_second_audio_dev_var.get():
             self.audio_device_combo_2.config(state="readonly")
+            self.audio_device_host_api_combo_2.config(state="readonly")
         else:
             self.audio_device_combo_2.config(state="disabled")
+            self.audio_device_host_api_combo_2.config(state="disabled")
 
     def on_audio_device_1_selection_change(self, event):
-        sel_dev_info = self.get_selected_device_info(1)
+        dev_name = self.audio_device_combo_1.get()
+        api_map = self.device_map[dev_name]
+        self.audio_device_host_api_combo_1['values'] = sort_by_preference(api_map.keys())
+        self.audio_device_host_api_combo_1.current(0)
+        self.audio_device_host_api_combo_1.event_generate("<<ComboboxSelected>>")
+
+    def on_audio_device_host_api_1_selection_change(self, event):
+        dev_name = self.audio_device_combo_1.get()
+        host_api = self.audio_device_host_api_combo_1.get()
+        caps = self.device_map[dev_name][host_api]
         info_text = (
-            f"API: {sel_dev_info.api}\n"
-            f"Channels: {sel_dev_info.max_input_channels}\n"
-            f"Samplerate: {int(sel_dev_info.default_samplerate)}"
+            f"Index: {caps.index}\n"
+            f"Channels: {caps.channels}\n"
+            f"Samplerate: {int(caps.samplerate)}\n"
+            f"Latency range: {caps.min_latency} - {caps.max_latency}"
         )
         self.input_dev_info_label_1.config(text=info_text)
 
     def on_audio_device_2_selection_change(self, event):
-        sel_dev_info = self.get_selected_device_info(2)
+        dev_name = self.audio_device_combo_2.get()
+        api_map = self.device_map[dev_name]
+        self.audio_device_host_api_combo_2['values'] = sort_by_preference(api_map.keys())
+        self.audio_device_host_api_combo_2.current(0)
+        self.audio_device_host_api_combo_2.event_generate("<<ComboboxSelected>>")
+
+    def on_audio_device_host_api_2_selection_change(self, event):
+        dev_name = self.audio_device_combo_2.get()
+        host_api = self.audio_device_host_api_combo_2.get()
+        caps = self.device_map[dev_name][host_api]
         info_text = (
-            f"API: {sel_dev_info.api}\n"
-            f"Channels: {sel_dev_info.max_input_channels}\n"
-            f"Samplerate: {int(sel_dev_info.default_samplerate)}"
+            f"Index: {caps.index}\n"
+            f"Channels: {caps.channels}\n"
+            f"Samplerate: {int(caps.samplerate)}\n"
+            f"Latency range: {caps.min_latency} - {caps.max_latency}"
         )
         self.input_dev_info_label_2.config(text=info_text)
 
@@ -348,23 +398,11 @@ class CaptionerUI:
         self.row_i += 1
         return r
 
-    def get_selected_device_index(self, dev_num: int) -> int:
-        sel_name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
-        # Find the index in input_devices
-        dev_index = None
-        for i, name in enumerate(self.device_map.keys()):
-            if name == sel_name:
-                dev_index = i
-                break
-        return dev_index
-
     def get_selected_device_info(self, dev_num: int) -> InputDeviceInfo:
-        sel_name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
-        # Find the index in input_devices
-        for name, dev_info in self.device_map.items():
-            if name == sel_name:
-                return dev_info
-        return None
+        name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
+        api = self.audio_device_host_api_combo_1.get() if dev_num == 1 else self.audio_device_host_api_combo_2.get()
+
+        return InputDeviceInfo(name, api, self.device_map[name][api])
 
     def run_captioner(self):
         self.audio_queue = queue.Queue()
@@ -477,10 +515,11 @@ class AudioListener:
         self.is_first = True
 
         self.WHISPER_SAMPLERATE = 16000
-        self.in_stream_latency = 0.5
 
         self.device_rate = int(input_device_info.default_samplerate)
         self.device_channels = input_device_info.max_input_channels
+        self.in_stream_latency = input_device_info.max_latency
+        self.blocksize = int(self.device_rate * self.in_stream_latency)
 
         self.audio_queue = queue.Queue()
         self.result_queue = result_queue
@@ -539,24 +578,23 @@ class AudioListener:
         return conc
 
     def run(self):
-        blocksize = int(self.device_rate * self.in_stream_latency)
+        print_info = (
+            f"Listening to [{self.input_device_info.index}] {self.input_device_info.name}\n"
+            f"  API: {self.input_device_info.api}\n"
+            f"  Channels: {self.device_channels}\n"
+            f"  Samplerate: {self.device_rate}\n"
+            f"  Blocksize: {self.blocksize} frames (~{self.in_stream_latency} s)"
+        )
+        print(print_info, flush=True)
+
         with sd.InputStream(
             samplerate=self.device_rate,
             channels=self.device_channels,
             dtype="float32",
-            blocksize=blocksize,
+            blocksize=self.blocksize,
             callback=self.audio_callback,
             device=self.input_device_info.index
         ):
-            print_info = (
-                f"Listening to [{self.input_device_info.index}] {self.input_device_info.name}\n"
-                f"  API: {self.input_device_info.api}\n"
-                f"  Channels: {self.input_device_info.max_input_channels}\n"
-                f"  Samplerate: {self.input_device_info.default_samplerate}\n"
-                f"  Blocksize: {blocksize} frames (~{self.in_stream_latency} s)"
-            )
-            print(print_info, flush=True)
-
             while not self.stop_event.is_set():
                 chunk = self.receive_audio_chunk()
                 if chunk is None or len(chunk) == 0:
