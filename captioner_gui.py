@@ -8,8 +8,17 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 import logging
 import captioner_common as ccmn
+from scipy.signal import resample_poly
 
 logger = logging.getLogger(__name__)
+
+class InputDeviceInfo:
+    def __init__(self, name, api, max_input_channels, default_samplerate):
+        self.name = name
+        self.api = api
+        self.max_input_channels = max_input_channels
+        self.default_samplerate = default_samplerate
+        self.index = 0
 
 def list_unique_input_devices(preferred_apis=None):
     """
@@ -27,26 +36,29 @@ def list_unique_input_devices(preferred_apis=None):
     devices = sd.query_devices()
     apis = sd.query_hostapis()
 
-    unique = {}
+    unique_devs = {}
     for i, dev in enumerate(devices):
         if dev['max_input_channels'] > 0:
             api_name = apis[dev['hostapi']]['name']
             key = dev['name']
-            entry = (i, api_name, dev)
+            entry = InputDeviceInfo(dev['name'], api_name, dev['max_input_channels'], dev['default_samplerate'])
 
-            if key not in unique:
-                unique[key] = entry
+            if key not in unique_devs:
+                unique_devs[key] = entry
             else:
                 # Prefer device with "better" API
-                existing = unique[key]
+                existing = unique_devs[key]
                 try:
-                    if preferred_apis.index(api_name) < preferred_apis.index(existing[1]):
-                        unique[key] = entry
+                    if preferred_apis.index(api_name) < preferred_apis.index(existing.api):
+                        unique_devs[key] = entry
                 except ValueError:
                     # if API not in preferred list, keep existing
                     pass
 
-    return unique
+    for i, dev in enumerate(unique_devs.values()):
+        dev.index = i
+
+    return unique_devs
 
 def default_input_device_index():
     return sd.default.device[0]
@@ -123,7 +135,17 @@ class CaptionerUI:
         tk.Label(root, text="Audio device").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.audio_device_combo = ttk.Combobox(root, values=device_list, state="readonly")
         self.audio_device_combo.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # Use a Label widget for multiline read-only display
+        row_idx = self.next_row()
+        tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.input_dev_info_label = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
+        self.input_dev_info_label.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # Now set the combo selection changed callback and select the default audio device.
         self.audio_device_combo.current(default_device_index if default_device_index < len(device_list) else 0)
+        self.audio_device_combo.bind("<<ComboboxSelected>>", self.on_audio_device_selection_change)
+        self.audio_device_combo.event_generate("<<ComboboxSelected>>")
 
         # --- Whisper model ---
         row_idx = self.next_row()
@@ -240,6 +262,15 @@ class CaptionerUI:
         else:
             self.target_lang_combo.config(state="disabled")
 
+    def on_audio_device_selection_change(self, event):
+        sel_dev_info = self.get_selected_device_info()
+        info_text = (
+            f"API: {sel_dev_info.api}\n"
+            f"Channels: {sel_dev_info.max_input_channels}\n"
+            f"Samplerate: {int(sel_dev_info.default_samplerate)}"
+        )
+        self.input_dev_info_label.config(text=info_text)
+
     # Helper to manage grid row indices
     def next_row(self):
         r = self.row_i
@@ -255,6 +286,14 @@ class CaptionerUI:
                 dev_index = i
                 break
         return dev_index
+
+    def get_selected_device_info(self) -> InputDeviceInfo:
+        sel_name = self.audio_device_combo.get()
+        # Find the index in input_devices
+        for name, dev_info in self.device_map.items():
+            if name == sel_name:
+                return dev_info
+        return None
 
     def run_captioner(self):
         self.audio_queue = queue.Queue()
@@ -304,23 +343,15 @@ class CaptionerUI:
         self.captions_overlay = CaptionsOverlay(self.root_wnd, self.resuts_queue, self.gui_queue)
         self.captions_overlay.start()
 
-
     def run_audio_listener(self):
-        dev_index = self.get_selected_device_index()
-
-        if dev_index is not None:
-            audio_input_device = dev_index 
-            audio_input_device_name = self.audio_device_combo.get()
-        else:
-            audio_input_device = self.default_input_device_index()
-            audio_input_device_name = self.device_map.keys()[audio_input_device]
+        dev_info = self.get_selected_device_info()
 
         min_chunk_size, valid = str_to_float(self.min_chunk_size_var.get())
         if not valid:
             print("Error: Invalid minimum chunk size. Setting to default: 0.6")
             min_chunk_size = 0.6
 
-        self.audio_listener = AudioListener(min_chunk_size, audio_input_device, audio_input_device_name, self.audio_queue)
+        self.audio_listener = AudioListener(min_chunk_size, dev_info, self.audio_queue)
         self.audio_thread = threading.Thread(target=self.audio_listener.run)
         self.audio_thread.start()
 
@@ -352,31 +383,54 @@ class CaptionerUI:
 
 
 class AudioListener:
-    def __init__(self, min_chunk_size: float, audio_input_device: int, audio_input_device_name: str, result_queue: queue.Queue):
+    def __init__(self, min_chunk_size: float, input_device_info: InputDeviceInfo, result_queue: queue.Queue):
         self.min_chunk_size = min_chunk_size
-        self.audio_input_device = audio_input_device
-        self.audio_input_device_name = audio_input_device_name
-        self.last_end = None
+        self.input_device_info = input_device_info
         self.is_first = True
 
         self.audio_queue = queue.Queue()
         self.result_queue = result_queue
-
         self.stop_event = threading.Event()
 
-        # setting whisper object by args 
-        self.SAMPLING_RATE = 16000
+        self.WHISPER_SAMPLERATE = 16000
+        self.in_stream_latency = 0.5
 
-    def audio_callback(self, indata, frames, time_info, status):
+        self.device_rate = int(input_device_info.default_samplerate)
+        self.device_channels = input_device_info.max_input_channels
+
+    def _audio_callback_old(self, indata, frames, time_info, status):
         if status:
             logger.warning(f"Audio callback status: {status}")
         pcm16 = (indata * 32767).astype(np.int16)
         audio_float = pcm16.astype(np.float32) / 32767.0
         self.audio_queue.put(audio_float.copy())
 
+    def downmix_mono(self, data: np.ndarray) -> np.ndarray:
+        """Convert multi-channel audio to mono by averaging channels"""
+        if data.shape[1] > 1:
+            return data.mean(axis=1)
+        return data[:, 0]
+
+    def resample_to_whisper(self, data: np.ndarray) -> np.ndarray:
+        """Resample audio to 16kHz if necessary"""
+        if self.device_rate == self.WHISPER_SAMPLERATE:
+            return data
+        return resample_poly(data, self.WHISPER_SAMPLERATE, self.device_rate)
+
+    def audio_callback(self, indata, frames, time_info, status):
+        if status:
+            logger.warning(f"Audio callback status: {status}")
+
+        mono = self.downmix_mono(indata)
+        mono16k = self.resample_to_whisper(mono)
+        #self.audio_queue.put(mono16k.astype(np.float32))
+        if mono16k.dtype != np.float32:
+            mono16k = mono16k.astype(np.float32)
+        self.audio_queue.put(mono16k)
+
     def receive_audio_chunk(self):
         out = []
-        minlimit = int(self.min_chunk_size * self.SAMPLING_RATE)
+        minlimit = int(self.min_chunk_size * self.WHISPER_SAMPLERATE)
         while sum(len(x) for x in out) < minlimit:
             try:
                 # Get a chunk from audio queue. Timeout is slightly longer than minimum chunk duration.
@@ -394,15 +448,24 @@ class AudioListener:
         return conc
 
     def run(self):
+        blocksize = int(self.device_rate * self.in_stream_latency)
         with sd.InputStream(
-            samplerate=self.SAMPLING_RATE,
-            channels=1,
+            samplerate=self.device_rate,
+            channels=self.device_channels,
             dtype="float32",
-            blocksize=int(self.SAMPLING_RATE * 0.5),
+            blocksize=blocksize,
             callback=self.audio_callback,
-            device=self.audio_input_device
+            device=self.input_device_info.index
         ):
-            print(f"Listening to {self.audio_input_device_name}.", flush=True)
+            print_info = (
+                f"Listening to [{self.input_device_info.index}] {self.input_device_info.name}\n"
+                f"  API: {self.input_device_info.api}\n"
+                f"  Channels: {self.input_device_info.max_input_channels}\n"
+                f"  Samplerate: {self.input_device_info.default_samplerate}\n"
+                f"  Blocksize: {blocksize} frames (~{self.in_stream_latency} s)"
+            )
+            print(print_info, flush=True)
+
             while not self.stop_event.is_set():
                 chunk = self.receive_audio_chunk()
                 if chunk is None or len(chunk) == 0:
