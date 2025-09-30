@@ -24,13 +24,14 @@ class InputDeviceCaps:
         return f"InputDeviceCaps(channels={self.channels}, samplerate={self.samplerate}, index={self.index})"
 
 class InputDeviceInfo:
-    def __init__(self, name: str, api: str, caps: InputDeviceCaps):
+    def __init__(self, name: str, api: str, latency: float, caps: InputDeviceCaps):
         self.name = name
         self.api = api
-        self.max_input_channels = caps.channels
-        self.default_samplerate = caps.samplerate
+        self.channels = caps.channels
+        self.samplerate = caps.samplerate
         self.min_latency = caps.min_latency
         self.max_latency = caps.max_latency
+        self.latency = latency
         self.index = caps.index
 
 def sort_api_by_preference(api_list):
@@ -201,11 +202,38 @@ class CaptionerUI:
         self.audio_device_host_api_combo_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.audio_device_host_api_combo_1.bind("<<ComboboxSelected>>", self.on_audio_device_host_api_1_selection_change)
 
+        ch_resample_frame = tk.Frame(root)
+        ch_resample_frame.grid(row=row_idx, column=3)
+
+        self.audio_device_channels_var_1 = tk.StringVar(value="default ch")
+        self.audio_device_channels_combo_1 = ttk.Combobox(ch_resample_frame, values=["default ch", "2ch"], state="readonly", textvariable=self.audio_device_channels_var_1, width=10)
+        self.audio_device_channels_combo_1.pack(side="left", padx=(5, 5))
+
+        self.audio_device_resample_var_1 = tk.BooleanVar(value=True)
+        self.audio_device_resample_check_1 = ttk.Checkbutton(ch_resample_frame, text="Resample", variable=self.audio_device_resample_var_1)
+        self.audio_device_resample_check_1.pack(side="left", padx=(5, 5))
+
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
         tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.input_dev_info_label_1 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # For latency
+        latency_frame = tk.Frame(root)
+        latency_frame.grid(row=row_idx, column=3, padx=5, pady=5, sticky="ew")
+        latency_frame.columnconfigure(0, weight=1)
+        latency_frame.rowconfigure(0, weight=1)
+        latency_frame.rowconfigure(1, weight=1)
+
+        # Label
+        self.audio_device_latency_label_1 = ttk.Label(latency_frame, text="Latency: \nBlock size: ", relief="solid", justify="left", anchor="w")
+        self.audio_device_latency_label_1.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        # Slider
+        self.audio_device_latency_slider_var_1 = tk.DoubleVar(value=0.5)
+        self.audio_device_latency_slider_1 = tk.Scale(latency_frame, from_=0.1, to=1.0, orient="horizontal", resolution=0.01, variable=self.audio_device_latency_slider_var_1, command=self.on_audio_device_1_latency_change)
+        self.audio_device_latency_slider_1.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
 
         # Now set the combo selection changed callback and select the default audio device.
         self.audio_device_combo_1.set(dev_name)
@@ -229,11 +257,38 @@ class CaptionerUI:
         self.audio_device_host_api_combo_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.audio_device_host_api_combo_2.bind("<<ComboboxSelected>>", self.on_audio_device_host_api_2_selection_change)
 
+        ch_resample_frame_2 = tk.Frame(root)
+        ch_resample_frame_2.grid(row=row_idx, column=3)
+
+        self.audio_device_channels_var_2 = tk.StringVar(value="default ch")
+        self.audio_device_channels_combo_2 = ttk.Combobox(ch_resample_frame_2, values=["default ch", "2ch"], state="disabled", textvariable=self.audio_device_channels_var_2, width=10)
+        self.audio_device_channels_combo_2.pack(side="left", padx=(5, 5))
+
+        self.audio_device_resample_var_2 = tk.BooleanVar(value=True)
+        self.audio_device_resample_check_2 = ttk.Checkbutton(ch_resample_frame_2, text="Resample", variable=self.audio_device_resample_var_2, state="disabled")
+        self.audio_device_resample_check_2.pack(side="left", padx=(5, 5))
+
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
         tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.input_dev_info_label_2 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # For latency
+        latency_frame_2 = tk.Frame(root)
+        latency_frame_2.grid(row=row_idx, column=3, padx=5, pady=5, sticky="ew")
+        latency_frame_2.columnconfigure(0, weight=1)
+        latency_frame_2.rowconfigure(0, weight=1)
+        latency_frame_2.rowconfigure(1, weight=1)
+
+        # Label
+        self.audio_device_latency_label_2 = ttk.Label(latency_frame_2, text="Latency: \nBlock size: ", relief="solid", justify="left", anchor="w")
+        self.audio_device_latency_label_2.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        # Slider
+        self.audio_device_latency_slider_var_2 = tk.DoubleVar(value=0.5)
+        self.audio_device_latency_slider_2 = tk.Scale(latency_frame_2, from_=0.1, to=1.0, orient="horizontal", resolution=0.01, variable=self.audio_device_latency_slider_var_2, command=self.on_audio_device_2_latency_change)
+        self.audio_device_latency_slider_2.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
 
         # Now set the combo selection changed callback and select the default audio device.
         self.audio_device_combo_2.set(dev_name)
@@ -308,14 +363,23 @@ class CaptionerUI:
         self.vad_check.grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
 
         # --- Buttons ---
+        buttons_frame = tk.Frame(root)
+        buttons_frame.grid(row=row_idx, rowspan=2, column=3, columnspan=2)
+
         row_idx = self.next_row()
-        self.start_btn = ttk.Button(root, text="Start", command=self.start)
-        self.quit_btn = ttk.Button(root, text="Quit", command=self.quit)
-        self.start_btn.grid(row=row_idx, column=2, sticky="e", padx=5, pady=10)
-        self.quit_btn.grid(row=row_idx, column=3, sticky="w", padx=5, pady=10)
+        self.start_btn = ttk.Button(buttons_frame, text="Start", command=self.start)
+        self.quit_btn = ttk.Button(buttons_frame, text="Quit", command=self.quit)
+        self.start_btn.grid(row=1, column=0, sticky="e", padx=5, pady=10)
+        self.quit_btn.grid(row=1, column=1, sticky="e", padx=5, pady=10)
+
+        # Update latency labels
+        self.on_audio_device_1_latency_change(None)
+        self.on_audio_device_2_latency_change(None)
 
         # make second column expand
         root.columnconfigure(1, weight=1)
+
+        root.protocol("WM_DELETE_WINDOW", self.quit)
 
     def show_modal_message(self, title, message, parent):
         # Create a modal Toplevel window
@@ -389,9 +453,13 @@ class CaptionerUI:
         if self.use_second_audio_dev_var.get():
             self.audio_device_combo_2.config(state="readonly")
             self.audio_device_host_api_combo_2.config(state="readonly")
+            self.audio_device_channels_combo_2.config(state="readonly")
+            self.audio_device_resample_check_2.config(state="readonly")
         else:
             self.audio_device_combo_2.config(state="disabled")
             self.audio_device_host_api_combo_2.config(state="disabled")
+            self.audio_device_channels_combo_2.config(state="disabled")
+            self.audio_device_resample_check_2.config(state="disabled")
 
     def on_audio_device_1_selection_change(self, event):
         dev_name = self.audio_device_combo_1.get()
@@ -431,6 +499,24 @@ class CaptionerUI:
         )
         self.input_dev_info_label_2.config(text=info_text)
 
+    def on_audio_device_1_latency_change(self, value):
+        dev_info = self.get_selected_device_info(1)
+        block_size = dev_info.samplerate * dev_info.latency
+        info_text = (
+            f"Latency: {dev_info.latency: .2f} s\n"
+            f"Block size: {int(block_size)} frames"
+        )
+        self.audio_device_latency_label_1.config(text=info_text)
+
+    def on_audio_device_2_latency_change(self, value):
+        dev_info = self.get_selected_device_info(2)
+        block_size = dev_info.samplerate * dev_info.latency
+        info_text = (
+            f"Latency: {dev_info.latency: .2f} s\n"
+            f"Block size: {int(block_size)} frames"
+        )
+        self.audio_device_latency_label_2.config(text=info_text)
+
     # Helper to manage grid row indices
     def next_row(self):
         r = self.row_i
@@ -440,8 +526,18 @@ class CaptionerUI:
     def get_selected_device_info(self, dev_num: int) -> InputDeviceInfo:
         name = self.audio_device_combo_1.get() if dev_num == 1 else self.audio_device_combo_2.get()
         api = self.audio_device_host_api_combo_1.get() if dev_num == 1 else self.audio_device_host_api_combo_2.get()
+        ch = self.audio_device_channels_var_1.get() if dev_num == 1 else self.audio_device_channels_var_2.get()
+        resample = self.audio_device_resample_var_1.get() if dev_num == 1 else self.audio_device_resample_var_2.get()
+        latency = self.audio_device_latency_slider_var_1.get() if dev_num == 1 else self.audio_device_latency_slider_var_2.get()
 
-        return InputDeviceInfo(name, api, self.device_map[name][api])
+        import copy
+        caps = copy.copy(self.device_map[name][api])
+        if ch == "2ch":
+            caps.channels = 2
+        if not resample:
+            caps.samplerate = 16000.0
+
+        return InputDeviceInfo(name, api, latency, caps)
 
     def run_captioner(self):
         self.audio_queue = queue.Queue()
@@ -555,9 +651,9 @@ class AudioListener:
 
         self.WHISPER_SAMPLERATE = 16000
 
-        self.device_rate = int(input_device_info.default_samplerate)
-        self.device_channels = input_device_info.max_input_channels
-        self.in_stream_latency = input_device_info.max_latency
+        self.device_rate = int(input_device_info.samplerate)
+        self.device_channels = input_device_info.channels
+        self.in_stream_latency = input_device_info.latency
         self.blocksize = int(self.device_rate * self.in_stream_latency)
 
         self.audio_queue = queue.Queue()
