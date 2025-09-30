@@ -8,7 +8,6 @@ import tkinter as tk
 from tkinter import ttk
 import logging
 import captioner_common as ccmn
-from scipy.signal import resample_poly
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -34,7 +33,7 @@ class InputDeviceInfo:
         self.max_latency = caps.max_latency
         self.index = caps.index
 
-def sort_by_preference(api_list):
+def sort_api_by_preference(api_list):
     if sys.platform.startswith("win"):
         preferred_apis = ["MME", "Windows DirectSound", "Windows WDM-KS", "Windows WASAPI"]
     elif sys.platform == "darwin":
@@ -55,10 +54,22 @@ def list_unique_input_devices():
     all_devices = sd.query_devices()
     hostapis = sd.query_hostapis()
 
-    for i, dev in enumerate(all_devices):
-        if dev['max_input_channels'] == 0:
-            continue  # skip output devices
+    input_devices = []
+    input_devices_mme = []
 
+    for dev in all_devices:
+        if dev['max_input_channels'] > 0:
+            hostapi_name = hostapis[dev['hostapi']]['name']
+            if hostapi_name == "MME":
+                input_devices_mme.append(dev)
+            else:
+                input_devices.append(dev)
+
+    # Convert to DeviceList
+    input_devices = sd.DeviceList(input_devices)
+    input_devices_mme = sd.DeviceList(input_devices_mme)
+
+    for dev in input_devices:
         hostapi_name = hostapis[dev['hostapi']]['name']
 
         devices_dict[dev['name']][hostapi_name] = InputDeviceCaps(
@@ -68,6 +79,34 @@ def list_unique_input_devices():
             max_latency=dev['default_high_input_latency'],
             index=dev['index']
         )
+
+    for dev in input_devices_mme:
+        # If we already saved a device whose name starts with this devices name,
+        # we assume that it is the same device - only with a cut-off name - and we
+        # just add device caps for MME API to the saved device's API map.
+        merged = False
+        for saved_name, saved_api_map in devices_dict.items():
+            if saved_name.startswith(dev['name']):
+                if not saved_api_map.get("MME"):
+                    saved_api_map["MME"] = InputDeviceCaps(
+                        channels=dev['max_input_channels'],
+                        samplerate=dev['default_samplerate'],
+                        min_latency=dev['default_low_input_latency'],
+                        max_latency=dev['default_high_input_latency'],
+                        index=dev['index']
+                    )
+                    merged = True
+                    break
+
+        if not merged:
+            devices_dict[dev['name']]["MME"] = InputDeviceCaps(
+                channels=dev['max_input_channels'],
+                samplerate=dev['default_samplerate'],
+                min_latency=dev['default_low_input_latency'],
+                max_latency=dev['default_high_input_latency'],
+                index=dev['index']
+            )
+
     return devices_dict
 
 
@@ -164,7 +203,7 @@ class CaptionerUI:
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
-        tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.input_dev_info_label_1 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
@@ -192,7 +231,7 @@ class CaptionerUI:
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
-        tk.Label(root, text="Info text").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.input_dev_info_label_2 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
@@ -357,7 +396,7 @@ class CaptionerUI:
     def on_audio_device_1_selection_change(self, event):
         dev_name = self.audio_device_combo_1.get()
         api_map = self.device_map[dev_name]
-        self.audio_device_host_api_combo_1['values'] = sort_by_preference(api_map.keys())
+        self.audio_device_host_api_combo_1['values'] = sort_api_by_preference(api_map.keys())
         self.audio_device_host_api_combo_1.current(0)
         self.audio_device_host_api_combo_1.event_generate("<<ComboboxSelected>>")
 
@@ -376,7 +415,7 @@ class CaptionerUI:
     def on_audio_device_2_selection_change(self, event):
         dev_name = self.audio_device_combo_2.get()
         api_map = self.device_map[dev_name]
-        self.audio_device_host_api_combo_2['values'] = sort_by_preference(api_map.keys())
+        self.audio_device_host_api_combo_2['values'] = sort_api_by_preference(api_map.keys())
         self.audio_device_host_api_combo_2.current(0)
         self.audio_device_host_api_combo_2.event_generate("<<ComboboxSelected>>")
 
@@ -536,24 +575,24 @@ class AudioListener:
         self.audio_queue.put(audio_float.copy())
 
     def downmix_mono(self, data: np.ndarray) -> np.ndarray:
-        """Convert multi-channel audio to mono by averaging channels"""
+        # Convert multi-channel audio to mono by averaging channels
         if data.shape[1] > 1:
             return data.mean(axis=1)
         return data[:, 0]
 
     def resample_to_whisper(self, data: np.ndarray) -> np.ndarray:
-        """Resample audio to 16kHz if necessary"""
+        # Resample audio to 16kHz if necessary
         if self.device_rate == self.WHISPER_SAMPLERATE:
             return data
+        from scipy.signal import resample_poly
         return resample_poly(data, self.WHISPER_SAMPLERATE, self.device_rate)
 
     def audio_callback(self, indata, frames, time_info, status):
-        if status:
+        if status and not self.is_first:
             logger.warning(f"Audio callback status: {status}")
 
         mono = self.downmix_mono(indata)
         mono16k = self.resample_to_whisper(mono)
-        #self.audio_queue.put(mono16k.astype(np.float32))
         if mono16k.dtype != np.float32:
             mono16k = mono16k.astype(np.float32)
         self.audio_queue.put(mono16k)
@@ -583,7 +622,7 @@ class AudioListener:
             f"  API: {self.input_device_info.api}\n"
             f"  Channels: {self.device_channels}\n"
             f"  Samplerate: {self.device_rate}\n"
-            f"  Blocksize: {self.blocksize} frames (~{self.in_stream_latency} s)"
+            f"  Blocksize: {self.blocksize} frames (latency ~{self.in_stream_latency} s)"
         )
         print(print_info, flush=True)
 
