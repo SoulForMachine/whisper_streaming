@@ -14,6 +14,48 @@ import json
 import re
 
 
+
+class WhisperServerParams:
+    def __init__(self):
+        # Zoom URL
+        self.zoom_url = ""
+
+        # Audio processing
+        self.min_chunk_size = 1.0
+
+        # Whisper model
+        self.model = 'large-v2'
+        self.model_cache_dir = None
+        self.model_dir = None
+        self.warmup_file = "data/samples_jfk.wav"
+
+        # Language and task
+        self.language = 'auto'
+        self.task = 'transcribe'
+        self.enable_translation = True
+        self.target_language = ""
+
+        # Backend
+        self.backend = 'faster-whisper'
+        self.nsp_threshold = None
+
+        # Voice activity detection
+        self.vac = False
+        self.vac_chunk_size = 0.04
+        self.vad = False
+
+        # Buffer trimming
+        self.buffer_trimming = 'segment'
+        self.buffer_trimming_sec = 15
+
+        # Device and compute
+        self.whisper_device = 'cuda'
+        self.whisper_compute_type = 'float32'
+
+        # Logging
+        self.log_level = 'DEBUG'
+
+
 ######### WhisperOnline
 
 class WhisperOnline:
@@ -21,28 +63,24 @@ class WhisperOnline:
         import whisper_online as wo
 
         logger = logging.getLogger(__name__)
-        parser = argparse.ArgumentParser()
 
-        # options from whisper_online
-        wo.add_shared_args(parser)
-        args = parser.parse_args()
+        params = WhisperServerParams()
 
-        # Update args with client provided values
+        # Update params with client provided values
         for key, value in client_params.items():
-            if hasattr(args, key):
-                setattr(args, key, value)
+            if hasattr(params, key):
+                setattr(params, key, value)
 
-        wo.set_logging(args, logger, other="")
+        wo.set_logging(params, logger, other="")
 
-        # Create whisper online processor object with args
-        self.asr, self.asr_proc = wo.asr_factory(args)
+        # Create whisper online processor object with params
+        self.asr, self.asr_proc = wo.asr_factory(params)
 
         # warm up the ASR so first chunk isn’t slow
-        warmup_file = "data/samples_jfk.wav"
-        if os.path.isfile(warmup_file):
-            a = wo.load_audio_chunk(warmup_file,0,1)
+        if os.path.isfile(params.warmup_file):
+            a = wo.load_audio_chunk(params.warmup_file, 0, 1)
             self.asr.transcribe(a)
-            logger.info("Whisper is warmed up.")
+            logger.info("Whisper has warmed up.")
         else:
             logger.warning("The warm up file is not available. Whisper is not warmed up. The first chunk processing may take longer.")
 
@@ -392,7 +430,9 @@ class WhisperServer:
 
             if self.write_wav:
                 import wav_writer
-                wav_out = wav_writer.WavWriter("debug_received.wav")
+                from datetime import datetime
+                filename = datetime.now().strftime("recording-%Y%m%d_%H%M%S.wav")
+                wav_out = wav_writer.WavWriter(filename)
 
             # Step 2: confirm initialization
             ccmn.send_json(conn, {"type": "status", "value": "ready"})
@@ -471,6 +511,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=5000, help="Port number. Default: 5000")
     parser.add_argument("--write-wav", action="store_true", help="Write received audio to a wav file.")
     parser.add_argument("--write-transcript", action="store_true", help="Write received transcript to a text file.")
+    parser.add_argument("--warmup-file", type=str, default="data/samples_jfk.wav", help="Provide the audio file used to warm up the whisper model.")
     args = parser.parse_args(sys.argv[1:])
 
     whisper_server = WhisperServer(args.host, args.port, args.write_wav, args.write_transcript)

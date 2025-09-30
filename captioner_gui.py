@@ -175,7 +175,7 @@ class CaptionerUI:
         self.server_url_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.server_port_var = tk.StringVar(value="5000")
         self.server_port_entry = ttk.Entry(root, textvariable=self.server_port_var, width=6)
-        self.server_port_entry.grid(row=row_idx, column=3, sticky="ew", padx=5, pady=5)
+        self.server_port_entry.grid(row=row_idx, column=3, sticky="w", padx=5, pady=5)
 
         # --- Zoom URL ---
         row_idx = self.next_row()
@@ -184,9 +184,10 @@ class CaptionerUI:
         self.zoom_url_entry = ttk.Entry(root, textvariable=self.zoom_url_var)
         self.zoom_url_entry.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.clear_btn = ttk.Button(root, text="Clear", command=lambda: self.zoom_url_var.set(""))
-        self.clear_btn.grid(row=row_idx, column=3, sticky="ew", padx=5, pady=5)
+        self.clear_btn.grid(row=row_idx, column=3, sticky="w", padx=5, pady=5)
 
         # --- Audio device 1 ---
+
         self.device_map = list_unique_input_devices()
         device_list = list(self.device_map.keys())
         dev_name, api_name = default_input_device(self.device_map)
@@ -215,8 +216,7 @@ class CaptionerUI:
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
-        tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.input_dev_info_label_1 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
+        self.input_dev_info_label_1 = ttk.Label(root, text="", relief="solid", justify="left", anchor="nw")
         self.input_dev_info_label_1.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # For latency
@@ -241,6 +241,7 @@ class CaptionerUI:
         self.audio_device_combo_1.event_generate("<<ComboboxSelected>>")
 
         # --- Audio device 2 ---
+
         row_idx = self.next_row()
         tk.Label(root, text="Audio device 2").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
         self.audio_device_combo_2 = ttk.Combobox(root, values=device_list, state="disabled")
@@ -270,8 +271,7 @@ class CaptionerUI:
 
         # Use a Label widget for multiline read-only display
         row_idx = self.next_row()
-        tk.Label(root, text="").grid(row=row_idx, column=0, sticky="w", padx=5, pady=5)
-        self.input_dev_info_label_2 = tk.Label(root, text="", bd=1, relief="solid", justify="left", anchor="nw")
+        self.input_dev_info_label_2 = ttk.Label(root, text="", relief="solid", justify="left", anchor="nw", state="disabled")
         self.input_dev_info_label_2.grid(row=row_idx, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
         # For latency
@@ -282,12 +282,12 @@ class CaptionerUI:
         latency_frame_2.rowconfigure(1, weight=1)
 
         # Label
-        self.audio_device_latency_label_2 = ttk.Label(latency_frame_2, text="Latency: \nBlock size: ", relief="solid", justify="left", anchor="w")
+        self.audio_device_latency_label_2 = ttk.Label(latency_frame_2, text="Latency: \nBlock size: ", relief="solid", justify="left", anchor="w", state="disabled")
         self.audio_device_latency_label_2.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
         # Slider
         self.audio_device_latency_slider_var_2 = tk.DoubleVar(value=0.5)
-        self.audio_device_latency_slider_2 = tk.Scale(latency_frame_2, from_=0.1, to=1.0, orient="horizontal", resolution=0.01, variable=self.audio_device_latency_slider_var_2, command=self.on_audio_device_2_latency_change)
+        self.audio_device_latency_slider_2 = tk.Scale(latency_frame_2, from_=0.1, to=1.0, orient="horizontal", resolution=0.01, variable=self.audio_device_latency_slider_var_2, command=self.on_audio_device_2_latency_change, state="disabled")
         self.audio_device_latency_slider_2.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
 
         # Now set the combo selection changed callback and select the default audio device.
@@ -452,14 +452,20 @@ class CaptionerUI:
     def on_enable_second_audio_device(self):
         if self.use_second_audio_dev_var.get():
             self.audio_device_combo_2.config(state="readonly")
+            self.input_dev_info_label_2.config(state="normal")
             self.audio_device_host_api_combo_2.config(state="readonly")
             self.audio_device_channels_combo_2.config(state="readonly")
-            self.audio_device_resample_check_2.config(state="readonly")
+            self.audio_device_resample_check_2.config(state="normal")
+            self.audio_device_latency_label_2.config(state="readonly")
+            self.audio_device_latency_slider_2.config(state="normal")
         else:
             self.audio_device_combo_2.config(state="disabled")
+            self.input_dev_info_label_2.config(state="disabled")
             self.audio_device_host_api_combo_2.config(state="disabled")
             self.audio_device_channels_combo_2.config(state="disabled")
             self.audio_device_resample_check_2.config(state="disabled")
+            self.audio_device_latency_label_2.config(state="disabled")
+            self.audio_device_latency_slider_2.config(state="disabled")
 
     def on_audio_device_1_selection_change(self, event):
         dev_name = self.audio_device_combo_1.get()
